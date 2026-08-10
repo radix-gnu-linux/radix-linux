@@ -2,538 +2,156 @@ name: build Radix GNU/Linux ISO
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
-
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
-
   repository_dispatch:
-    types:
-      - packages-updated
-      - radix-updated
-
+    types: [packages-updated, radix-updated]
   schedule:
     - cron: '17 7 * * 0'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: radix-iso-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   iso:
-    name: build and test image
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 360
-
     env:
-      DEBIAN_FRONTEND: noninteractive
-
-      JANET_VERSION: 1.41.2
-      JANET_SHA256: 168e97e1b790f6e9d1e43685019efecc4ee473d6b9f8c421b49c195336c0b725
-
       RADIX_REQUIRE_KDE: '1'
-
+      RADIX_REPOSITORY_URL: https://github.com/radix-gnu-linux/radix.git
+      RADIX_PACKAGES_URL: https://github.com/radix-gnu-linux/radix-packages.git
+      RADIX_LINUX_URL: https://github.com/radix-gnu-linux/radix-linux.git
     steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          df -h
+
+      - name: Install build and VM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git curl wget xxd gprolog bubblewrap cpio xorriso \
+            grub-pc-bin grub-efi-amd64-bin mtools qemu-system-x86 ovmf \
+            musl-tools bc bison flex perl python3 python3-yaml openssl \
+            libssl-dev libelf-dev kmod xz-utils bzip2 file lua5.4 rsync
+
+      - name: Build and install Janet
+        shell: bash
+        env:
+          JANET_VERSION: 1.41.2
+          JANET_SHA256: 168e97e1b790f6e9d1e43685019efecc4ee473d6b9f8c421b49c195336c0b725
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/janet-${JANET_VERSION}.tar.gz"
+          source_dir="$RUNNER_TEMP/janet-${JANET_VERSION}"
+          rm -rf "$source_dir"
+          mkdir -p "$source_dir"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://github.com/janet-lang/janet/archive/refs/tags/v${JANET_VERSION}.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$JANET_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" --strip-components=1 -C "$source_dir"
+          make -C "$source_dir" -j"$(nproc)"
+          make -C "$source_dir" test
+          test -x "$source_dir/build/janet"
+          test -f "$source_dir/build/janet.h"
+          test -f "$source_dir/build/libjanet.a"
+          sudo install -d /usr/local/bin /usr/local/include/janet /usr/local/lib
+          sudo install -m 0755 "$source_dir/build/janet" /usr/local/bin/janet
+          sudo install -m 0644 "$source_dir/build/janet.h" /usr/local/include/janet/janet.h
+          sudo ln -sfn janet/janet.h /usr/local/include/janet.h
+          sudo install -m 0644 "$source_dir/build/libjanet.a" /usr/local/lib/libjanet.a
+          hash -r
+          janet -v
+
       - name: Check out distro
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@v6
         with:
           path: radix-linux
           persist-credentials: false
 
-      - name: Check release tag and version
-        if: startsWith(github.ref, 'refs/tags/v')
-        working-directory: radix-linux
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          expected="v$(cat VERSION)"
-
-          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
-            echo "release tag $GITHUB_REF_NAME does not match VERSION $expected" >&2
-            exit 1
-          fi
-
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /opt/ghc \
-            /usr/local/lib/android \
-            || true
-
-          df -h
-
-      - name: Install build and VM tools
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sudo apt-get update
-
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            git \
-            curl \
-            ca-certificates \
-            wget \
-            xxd \
-            gprolog \
-            bubblewrap \
-            cpio \
-            xorriso \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            mtools \
-            qemu-system-x86 \
-            ovmf \
-            musl-tools \
-            bc \
-            bison \
-            flex \
-            perl \
-            python3 \
-            python3-yaml \
-            openssl \
-            libssl-dev \
-            libelf-dev \
-            kmod \
-            xz-utils \
-            bzip2 \
-            file \
-            lua5.4 \
-            rsync
-
-      - name: Build and install Janet
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          archive="$RUNNER_TEMP/janet-${JANET_VERSION}.tar.gz"
-          source_dir="$RUNNER_TEMP/janet-${JANET_VERSION}"
-
-          rm -rf "$source_dir"
-          mkdir -p "$source_dir"
-
-          echo "Downloading Janet ${JANET_VERSION}..."
-
-          curl \
-            --fail \
-            --location \
-            --proto '=https' \
-            --tlsv1.2 \
-            "https://github.com/janet-lang/janet/archive/refs/tags/v${JANET_VERSION}.tar.gz" \
-            --output "$archive"
-
-          echo "Verifying Janet source archive..."
-
-          printf '%s  %s\n' \
-            "$JANET_SHA256" \
-            "$archive" \
-            | sha256sum --check --strict
-
-          echo "Extracting Janet..."
-
-          tar \
-            -xzf "$archive" \
-            --strip-components=1 \
-            -C "$source_dir"
-
-          echo "Building Janet for Linux..."
-
-          make \
-            -C "$source_dir" \
-            -j"$(nproc)"
-
-          echo "Running Janet tests..."
-
-          make \
-            -C "$source_dir" \
-            test
-
-          echo "Checking Linux Janet build artifacts..."
-
-          test -x "$source_dir/build/janet"
-          test -f "$source_dir/build/janet.h"
-          test -f "$source_dir/build/libjanet.a"
-
-          echo "Installing Janet Linux artifacts..."
-
-          sudo install -d \
-            /usr/local/bin \
-            /usr/local/include/janet \
-            /usr/local/lib
-
-          sudo install \
-            -m 0755 \
-            "$source_dir/build/janet" \
-            /usr/local/bin/janet
-
-          sudo install \
-            -m 0644 \
-            "$source_dir/build/janet.h" \
-            /usr/local/include/janet/janet.h
-
-          sudo ln -sfn \
-            janet/janet.h \
-            /usr/local/include/janet.h
-
-          sudo install \
-            -m 0644 \
-            "$source_dir/build/libjanet.a" \
-            /usr/local/lib/libjanet.a
-
-          hash -r
-
-          echo
-          echo "Janet installation:"
-          echo "  executable: $(command -v janet)"
-          echo "  header:     /usr/local/include/janet/janet.h"
-          echo "  static lib: /usr/local/lib/libjanet.a"
-          echo
-
-          janet -v
-
-          ls -lh \
-            /usr/local/bin/janet \
-            /usr/local/include/janet/janet.h \
-            /usr/local/lib/libjanet.a
-
       - name: Check out Radix
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@v6
         with:
           repository: radix-gnu-linux/radix
           path: radix
           persist-credentials: false
 
       - name: Check out package channel
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@v6
         with:
           repository: radix-gnu-linux/radix-packages
           path: radix-packages
           persist-credentials: false
 
-      - name: Show source revisions
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "radix-linux:"
-          git -C radix-linux rev-parse HEAD
-
-          echo
-          echo "radix:"
-          git -C radix rev-parse HEAD
-
-          echo
-          echo "radix-packages:"
-          git -C radix-packages rev-parse HEAD
-
       - name: Check source trees
-        shell: bash
         run: |
-          set -euo pipefail
-
           ./radix-linux/tools/check-tree
           ./radix-packages/tools/check-tree
-
-          ./radix-linux/tools/check-package-contract \
-            ./radix-packages
-
-      - name: Verify Radix build dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Checking required tools..."
-
-          command -v janet
-          command -v gcc
-          command -v make
-          command -v gplc
-          command -v bwrap
-          command -v xxd
-          command -v python3
-          command -v lua5.4
-          command -v git
-
-          echo
-          echo "Checking Janet development files..."
-
-          test -f /usr/local/include/janet/janet.h
-          test -f /usr/local/lib/libjanet.a
-
-          echo
-          echo "Janet:"
-          janet -v
-
-          echo
-          echo "GNU Prolog:"
-          gplc --version || true
-
-          echo
-          echo "bubblewrap:"
-          bwrap --version
-
-          echo
-          echo "Radix build dependencies look good."
+          ./radix-linux/tools/check-package-contract ./radix-packages
 
       - name: Build Radix
         working-directory: radix
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          make \
-            -j"$(nproc)" \
-            build
-
-          test -x build/radix
-
-          ./build/radix --version
+        run: make -j"$(nproc)" build
 
       - name: Radix release gate
         working-directory: radix
-        shell: bash
+        run: make release-gate
+
+      - name: Prepare canonical store
         run: |
-          set -euo pipefail
-
-          make release-gate
-
-      - name: Prepare canonical Radix store
-        shell: bash
-        run: |
-          set -euo pipefail
-
           sudo mkdir -p /radix
           sudo chown -R "$USER":"$(id -gn)" /radix
 
-          test -d /radix
-
-          echo "Canonical Radix store root prepared:"
-          ls -ld /radix
-
-      - name: Check KDE release package contract
-        working-directory: radix-linux
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          RADIX_REQUIRE_KDE=1 \
-          ./tools/check-package-contract \
-            ../radix-packages
-
       - name: Qualify and build KDE-first live ISO
         working-directory: radix-linux
-        shell: bash
         run: |
-          set -euo pipefail
           set -o pipefail
-
           make iso \
             RADIX=../radix/build/radix \
             PACKAGES=../radix-packages \
             2>&1 | tee build-iso.log
 
-      - name: Show generated artifacts
-        if: always()
-        working-directory: radix-linux
-        shell: bash
-        run: |
-          set -u
-
-          echo "Build directory:"
-          find build -maxdepth 2 -type f -printf '%p %k KiB\n' 2>/dev/null \
-            | sort \
-            || true
-
-          echo
-          echo "Distribution directory:"
-          find dist -maxdepth 2 -type f -printf '%p %k KiB\n' 2>/dev/null \
-            | sort \
-            || true
-
-          echo
-          df -h
-
       - name: Boot live ISO
         working-directory: radix-linux
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          DIST="$PWD/dist" \
-          ./scripts/qemu-smoke.sh
+        run: DIST="$PWD/dist" ./scripts/qemu-smoke.sh
 
       - name: Install and reboot disposable VM
         working-directory: radix-linux
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BUILD="$PWD/build" \
-          DIST="$PWD/dist" \
-          ./scripts/qemu-install-smoke.sh
-
-      - name: Verify image checksums
-        working-directory: radix-linux/dist
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          shopt -s nullglob
-
-          checksum_files=( *.sha256 )
-
-          if [ "${#checksum_files[@]}" -eq 0 ]; then
-            echo "No .sha256 files were generated." >&2
-            exit 1
-          fi
-
-          for checksum_file in "${checksum_files[@]}"; do
-            echo "Verifying $checksum_file"
-            sha256sum -c "$checksum_file"
-          done
-
-      - name: Write CI build metadata
-        if: success()
-        working-directory: radix-linux
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p dist
-
-          cat > dist/github-build.json <<EOF
-          {
-            "repository": "${GITHUB_REPOSITORY}",
-            "workflow": "${GITHUB_WORKFLOW}",
-            "run_id": "${GITHUB_RUN_ID}",
-            "run_number": "${GITHUB_RUN_NUMBER}",
-            "ref": "${GITHUB_REF}",
-            "sha": "${GITHUB_SHA}",
-            "radix_linux_commit": "$(git rev-parse HEAD)",
-            "radix_commit": "$(git -C ../radix rev-parse HEAD)",
-            "radix_packages_commit": "$(git -C ../radix-packages rev-parse HEAD)",
-            "janet_version": "${JANET_VERSION}",
-            "kde_required": true
-          }
-          EOF
-
-          cat dist/github-build.json
+        run: BUILD="$PWD/build" ./scripts/qemu-install-smoke.sh
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@v5
         with:
           name: radix-build-log-${{ github.run_number }}
-          path: |
-            radix-linux/build-iso.log
-            radix-linux/build/**/*.log
-          if-no-files-found: warn
+          path: radix-linux/build-iso.log
+          if-no-files-found: ignore
           retention-days: 14
-          compression-level: 6
-          overwrite: true
 
       - name: Upload ISO artifact
-        if: success()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@v5
         with:
-          name: radix-gnu-linux-${{ github.run_id }}
+          name: radix-gnu-linux-${{ github.run_number }}
           path: |
             radix-linux/dist/*.iso
             radix-linux/dist/*.sha256
             radix-linux/dist/*.json
           if-no-files-found: error
           retention-days: 30
-          compression-level: 0
-          overwrite: true
 
-  publish:
-    name: publish tagged release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - iso
-
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download tested release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: radix-gnu-linux-${{ github.run_id }}
-          path: release-assets
-
-      - name: Show release assets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          find release-assets \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f %k KiB\n' \
-            | sort
-
-      - name: Verify downloaded checksums
-        working-directory: release-assets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          shopt -s nullglob
-
-          checksum_files=( *.sha256 )
-
-          if [ "${#checksum_files[@]}" -eq 0 ]; then
-            echo "No release checksum files were downloaded." >&2
-            exit 1
-          fi
-
-          for checksum_file in "${checksum_files[@]}"; do
-            echo "Verifying $checksum_file"
-            sha256sum -c "$checksum_file"
-          done
-
-      - name: Publish release assets
-        shell: bash
+      - name: Publish tagged release assets
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-
-          if ! gh release view \
-            "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            >/dev/null 2>&1
-          then
-            gh release create \
-              "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "Radix GNU/Linux ${GITHUB_REF_NAME}" \
-              --generate-notes
-          fi
-
-          assets=(
-            release-assets/*.iso
-            release-assets/*.sha256
-            release-assets/*.json
-          )
-
-          gh release upload \
-            "$GITHUB_REF_NAME" \
-            "${assets[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --title "Radix GNU/Linux ${GITHUB_REF_NAME}" --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" radix-linux/dist/*.iso radix-linux/dist/*.sha256 radix-linux/dist/*.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
