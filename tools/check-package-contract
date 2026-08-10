@@ -25,5 +25,18 @@ check() {
   [ "$missing" -ne 0 ] || echo "$label: $count recipes present"
 }
 check "$here/profiles/base.packages" 'base profile'
-check "$here/profiles/kde.packages" 'KDE profile'
+
+case "${RADIX_REQUIRE_KDE:-1}" in
+    1|yes|true)
+        check "$here/profiles/kde.packages" 'KDE profile'
+        ;;
+    0|no|false)
+        echo 'KDE profile: native package requirement disabled'
+        ;;
+    *)
+        echo "invalid RADIX_REQUIRE_KDE=${RADIX_REQUIRE_KDE}" >&2
+        exit 2
+        ;;
+esac
+
 exit "$failed"
