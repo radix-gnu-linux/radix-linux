@@ -1,4 +1,3 @@
-```yaml
 name: build Radix GNU/Linux ISO
 
 on:
@@ -538,4 +537,3 @@ jobs:
             "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
-```
