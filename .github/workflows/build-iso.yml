@@ -68,7 +68,7 @@ jobs:
             printf '%s  %s\n' "$JANET_SHA256" "$source" | sha256sum --check --strict
             tar -xzf "$source" --strip-components=1 -C "$RUNNER_TEMP/janet"
             make -C "$RUNNER_TEMP/janet" -j"$(nproc)"
-            sudo make -C "$RUNNER_TEMP/janet" install || true
+            sudo make -C "$RUNNER_TEMP/janet" install
             janet -v
 
       - name: Check out Radix
