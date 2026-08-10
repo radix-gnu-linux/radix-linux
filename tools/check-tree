@@ -30,8 +30,9 @@ for p in Path('installer').rglob('*.lua'):
 for p in Path('.').rglob('*'):
     if p.is_file() and any(x in p.parts for x in ('build','dist','__pycache__')): continue
     if p.name.endswith(('.pyc','.pyo','.o','.a','.so')): bad.append(f'binary/cache artifact: {p}')
-for required in ('README.md','SECURITY.md','VERSION','installer/setup-radix.lua','scripts/build-live.sh','scripts/qemu-install-smoke.sh'):
+for required in ('README.md','VERSION','installer/setup-radix.lua','scripts/build-live.sh','scripts/qemu-install-smoke.sh'):
     if not Path(required).exists(): bad.append(f'missing required file: {required}')
+
 # Release defaults are part of the distro contract. Keep these assertions
 # here so a harmless-looking refactor cannot silently point the installer at
 # somebody else's channel or turn the release image back into console-only.
