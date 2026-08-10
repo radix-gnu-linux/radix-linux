@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+for f in scripts/*.sh sbin/* tools/lua-run; do sh -n "$f"; done
+python3 - <<'__PYCHECK__'
+from pathlib import Path
+for p in Path('tools').glob('*.py'):
+    compile(p.read_text(),str(p),'exec')
+print('python syntax: OK')
+__PYCHECK__
+python3 - <<'__YAMLCHECK__'
+from pathlib import Path
+try:
+    import yaml
+except ImportError:
+    print('workflow yaml: SKIP (PyYAML not installed)')
+else:
+    for p in Path('.github/workflows').glob('*.yml'):
+        with p.open() as f:
+            yaml.safe_load(f)
+    print('workflow yaml: OK')
+__YAMLCHECK__
+python3 - <<'__CHECK__'
+from hashlib import sha256
+from pathlib import Path
+bad=[]
+for p in Path('installer').rglob('*.lua'):
+    s=p.read_text()
+    if '\t' in s: bad.append(f'{p}: tab character')
+    if '\x00' in s: bad.append(f'{p}: NUL')
+for p in Path('.').rglob('*'):
+    if p.is_file() and any(x in p.parts for x in ('build','dist','__pycache__')): continue
+    if p.name.endswith(('.pyc','.pyo','.o','.a','.so')): bad.append(f'binary/cache artifact: {p}')
+for required in ('COPYING','DOCUMENTATION.md','LICENSE','README.md','VERSION','installer/setup-radix.lua','scripts/build-live.sh','scripts/qemu-install-smoke.sh'):
+    if not Path(required).exists(): bad.append(f'missing required file: {required}')
+markdown={p.as_posix() for p in Path('.').rglob('*.md')
+          if not any(x in p.parts for x in ('build','dist','__pycache__'))}
+if markdown!={'README.md','DOCUMENTATION.md'}:
+    bad.append('source documentation must be exactly README.md and DOCUMENTATION.md: '+repr(sorted(markdown)))
+license_path=Path('LICENSE')
+if license_path.exists() and 'SPDX-License-Identifier: GPL-3.0-or-later' not in license_path.read_text():
+    bad.append('LICENSE does not declare GPL-3.0-or-later')
+copying=Path('COPYING')
+if copying.exists() and sha256(copying.read_bytes()).hexdigest() != '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986':
+    bad.append('COPYING does not match the canonical GNU GPL version 3 text')
+defaults=Path('installer/lib/defaults.lua').read_text()
+for needle in (
+    "M.core_repository='https://github.com/radix-gnu-linux/radix-linux'",
+    "M.packages_repository='https://github.com/radix-gnu-linux/radix-packages.git'",
+    "M.radix_repository='https://github.com/radix-gnu-linux/radix.git'",
+    "M.desktop='kde'",
+):
+    if needle not in defaults: bad.append('release default missing: '+needle)
+workflow=Path('.github/workflows/build-iso.yml').read_text()
+for needle in ("RADIX_REQUIRE_KDE: '1'", 'make iso RADIX=../radix/build/radix PACKAGES=../radix-packages'):
+    if needle not in workflow: bad.append('release workflow contract missing: '+needle)
+if bad: raise SystemExit('\n'.join(bad))
+print('radix-linux source shape: OK')
+__CHECK__
+./tools/test-activation.sh >/dev/null
+if ./tools/lua-run -e 'assert(_VERSION >= "Lua 5.3")' >/dev/null 2>&1; then
+  for f in installer/*.lua installer/lib/*.lua tools/*.lua; do
+    ./tools/lua-run -e "assert(loadfile([[$f]]))"
+  done
+  ./tools/lua-run tools/test-installer.lua "$(pwd)" >/dev/null
+  acct=$(mktemp -d)
+  ./tools/lua-run tools/test-accounts.lua "$(pwd)" "$acct" >/dev/null
+  rm -rf "$acct"
+  img=$(mktemp); rm -f "$img"
+  trap 'rm -f "$img"' EXIT HUP INT TERM
+  ./tools/lua-run tools/test-gpt.lua "$(pwd)" "$img" >/dev/null
+  python3 tools/check-gpt.py --swap=0 "$img" >/dev/null
+  echo 'lua + GPT checks: OK'
+else
+  echo 'lua check: SKIP (install Lua 5.3+ for the full source gate)'
+fi

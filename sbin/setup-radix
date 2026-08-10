@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+ROOT=${RADIX_LINUX_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
+LUA=${LUA:-lua}
+exec "$LUA" "$ROOT/installer/setup-radix.lua" "$@"

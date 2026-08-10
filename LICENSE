@@ -1,0 +1,13 @@
+Radix GNU/Linux distribution integration, installer, and image tooling
+Copyright (C) 2026 Radix GNU/Linux contributors
+
+Unless otherwise noted, the original material in this repository is free
+software licensed under the GNU General Public License as published by the
+Free Software Foundation, either version 3 of the License or, at your option,
+any later version.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+The complete GNU General Public License version 3 is included in COPYING.
+Upstream and embedded packages retain their own licenses; this notice does not
+replace or alter those terms.

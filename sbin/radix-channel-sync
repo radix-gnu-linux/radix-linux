@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+packages_url=${RADIX_PACKAGES_ARCHIVE:-https://github.com/radix-gnu-linux/radix-packages/archive/refs/heads/main.tar.gz}
+core_url=${RADIX_LINUX_ARCHIVE:-https://github.com/radix-gnu-linux/radix-linux/archive/refs/heads/main.tar.gz}
+state=${RADIX_CHANNEL_STATE:-/var/lib/radix}
+command -v wget >/dev/null 2>&1 || { echo 'radix-channel-sync: wget is required' >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { echo 'radix-channel-sync: tar is required' >&2; exit 1; }
+tmp=$(mktemp -d /tmp/radix-channels.XXXXXX); trap 'rm -rf "$tmp"' EXIT INT TERM
+fetch() {
+  url=$1 out=$2
+  mkdir -p "$tmp/$out"
+  wget -q -O "$tmp/$out.tar.gz" "$url"
+  tar -xzf "$tmp/$out.tar.gz" -C "$tmp/$out" --strip-components=1
+}
+fetch "$packages_url" packages
+fetch "$core_url" distro
+[ -d "$tmp/packages/pkgs" ] || { echo 'package channel has no pkgs directory' >&2; exit 1; }
+[ -f "$tmp/distro/VERSION" ] && [ -d "$tmp/distro/installer" ] || { echo 'core channel is not a radix-linux tree' >&2; exit 1; }
+mkdir -p "$state"
+rm -rf "$state/repository.new" "$state/distro.new"
+mv "$tmp/packages" "$state/repository.new"
+mv "$tmp/distro" "$state/distro.new"
+rm -rf "$state/repository.old" "$state/distro.old"
+[ ! -e "$state/repository" ] || mv "$state/repository" "$state/repository.old"
+[ ! -e "$state/distro" ] || mv "$state/distro" "$state/distro.old"
+mv "$state/repository.new" "$state/repository"
+mv "$state/distro.new" "$state/distro"
+echo 'Radix channels updated.'
+echo 'Core:     https://github.com/radix-gnu-linux/radix-linux'
+echo 'Packages: https://github.com/radix-gnu-linux/radix-packages'

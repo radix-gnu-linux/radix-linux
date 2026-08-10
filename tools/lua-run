@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+if command -v lua5.4 >/dev/null 2>&1; then exec lua5.4 "$@"; fi
+if command -v lua >/dev/null 2>&1; then exec lua "$@"; fi
+if command -v texlua >/dev/null 2>&1; then
+  if [ "${1:-}" = -e ]; then
+    code=${2:-}; shift 2
+    tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    printf '%s\n' "$code" > "$tmp"
+    texlua "$tmp" "$@"
+    exit $?
+  fi
+  exec texlua "$@"
+fi
+echo 'Lua 5.3+ interpreter not found (lua5.4, lua, or texlua)' >&2
+exit 127

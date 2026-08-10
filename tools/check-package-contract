@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+packages=${1:-${PACKAGES:-$here/../radix-packages}}
+[ -d "$packages/pkgs" ] || { echo "package checkout not found: $packages" >&2; exit 1; }
+failed=0
+check() {
+  profile=$1 label=$2
+  count=0 missing=0
+  while IFS= read -r id; do
+    case "$id" in ''|'#'*) continue;; esac
+    count=$((count+1))
+    if [ ! -f "$packages/pkgs/$id.janet" ]; then
+      [ "$missing" -ne 0 ] || echo "$label missing recipes:" >&2
+      candidate=$(find "$packages/ports/recipes" -type f -name "${id##*/}.janet" 2>/dev/null | head -n 1 || true)
+      if [ -n "$candidate" ]; then
+        rel=${candidate#"$packages"/}
+        echo "  $id  (staged: $rel)" >&2
+      else
+        echo "  $id" >&2
+      fi
+      missing=$((missing+1)); failed=1
+    fi
+  done < "$profile"
+  [ "$missing" -ne 0 ] || echo "$label: $count recipes present"
+}
+check "$here/profiles/base.packages" 'base profile'
+check "$here/profiles/kde.packages" 'KDE profile'
+exit "$failed"

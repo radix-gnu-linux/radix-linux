@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+packages=${PACKAGES:-${1:-$here/../radix-packages}}
+radix=${RADIX:-${2:-$here/../radix/build/radix}}
+[ -x "$radix" ] || { echo "Radix executable not found: $radix" >&2; exit 1; }
+[ -x "$packages/tools/qualify-set" ] || {
+  echo "radix-packages does not contain tools/qualify-set; update the official package repo before building a release ISO" >&2
+  exit 1
+}
+mkdir -p "$packages/ports/sets"
+setfile="$packages/ports/sets/radix-desktop.txt"
+{
+  cat "$here/profiles/base.packages"
+  cat "$here/profiles/kde.packages"
+} | sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' | LC_ALL=C sort -u > "$setfile"
+echo "[radix-linux] qualifying $(wc -l < "$setfile" | tr -d ' ') package desktop profile"
+QUALIFY_ROOT=${QUALIFY_ROOT:-/radix} KEEP_QUALIFY_ROOT=1 RADIX="$radix" \
+  "$packages/tools/qualify-set" radix-desktop
