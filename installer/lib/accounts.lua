@@ -104,4 +104,33 @@ function M.write(cfg)
   u.write(base..'/passwd',passwd,'0644'); u.write(base..'/shadow',shadow,'0600')
   u.write(base..'/group',group,'0644'); u.write(base..'/gshadow',gshadow,'0600')
 end
+
+local function chroot_run(target,argv,allow_fail)
+  local cmd={'chroot',target}
+  for _,v in ipairs(argv) do cmd[#cmd+1]=v end
+  return u.run(cmd,{print=false,allow_fail=allow_fail})
+end
+
+function M.write_preview(cfg)
+  -- The preview root is a complete stage-0 userspace, so preserve its system
+  -- accounts instead of replacing /etc/passwd with the small native Radix
+  -- account database.
+  local bb=cfg.target..'/radix/profiles/system/bin/busybox'
+  if cfg.username and cfg.username~='' then
+    local groups={'audio','video','input','render','plugdev','bluetooth'}
+    if cfg.admin then groups[#groups+1]='sudo' end
+    for _,g in ipairs(groups) do chroot_run(cfg.target,{'groupadd','-f',g},true) end
+    local joined=table.concat(groups,',')
+    chroot_run(cfg.target,{'useradd','-m','-s','/bin/bash','-G',joined,cfg.username},false)
+    if not cfg.noninteractive then
+      local user_hash=hash_password(prompt_confirmed('password for '..cfg.username,false),bb)
+      chroot_run(cfg.target,{'usermod','-p',user_hash,cfg.username},false)
+    end
+  end
+  if not cfg.noninteractive and ui.yesno('Set a separate root password',false) then
+    local root_hash=hash_password(prompt_confirmed('root password',false),bb)
+    chroot_run(cfg.target,{'usermod','-p',root_hash,'root'},false)
+  end
+end
+
 return M

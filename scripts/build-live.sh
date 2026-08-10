@@ -5,6 +5,7 @@ build=${BUILD:-$here/build}
 radix=${RADIX:-$here/../radix/build/radix}
 packages=${PACKAGES:-$here/../radix-packages}
 require_kde=${RADIX_REQUIRE_KDE:-1}
+preview_kde=${RADIX_KDE_PREVIEW:-0}
 
 "$here/scripts/check-host.sh" build
 
@@ -50,6 +51,9 @@ fi
 export RADIX_ROOT=/radix RADIX_RUN_ROOT=/run RADIX_REPOSITORY="$packages" RADIX_ALLOW_HOST_BOOTSTRAP=1 RADIX_SANDBOX=strict
 "$radix" system validate "$here/live/system.janet"
 
+# Build the packages the live installer needs in its PATH through the live
+# system itself. KDE/base target packages are realized separately and copied as
+# immutable store closures, so installer preflight never compiles after boot.
 rm -rf "$build/core-boot"
 "$radix" system image "$here/live/system.janet" "$build/core-boot"
 cp "$build/core-boot/initrd" "$build/live-initrd"
@@ -64,84 +68,29 @@ build_root() {
   case "$path" in /radix/store/*) printf '%s\n' "$path" >> "$roots_file";; *) echo "could not capture store path for $id: $path" >&2; exit 1;; esac
 }
 
+# Kernel alternatives offered by setup-radix.
 build_root base/linux-stable glibc
+# Full installed base profile.
 while IFS= read -r id; do case "$id" in ''|'#'*) continue;; esac; build_root "$id" glibc; done < "$here/profiles/base.packages"
+# KDE is the default install profile and therefore a hard payload contract for
+# normal release ISOs.
 if [ "$require_kde" = 1 ]; then
   while IFS= read -r id; do case "$id" in ''|'#'*) continue;; esac; build_root "$id" glibc; done < "$here/profiles/kde.packages"
 fi
+# Musl console path remains available as an explicit experimental option.
 if [ -f "$packages/pkgs/base/busybox-musl.janet" ]; then build_root base/busybox-musl musl; fi
+# Proprietary NVIDIA is optional at image-build time. The installer falls back
+# to Mesa when this recipe has not been promoted yet.
 if [ -f "$packages/pkgs/drivers/nvidia.janet" ]; then build_root drivers/nvidia glibc; fi
 
 sort -u "$roots_file" -o "$roots_file"
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT INT TERM
-mkdir -p \
-  "$tmp/radix-live/sbin" \
-  "$tmp/radix-live/bin" \
-  "$tmp/radix-live/boot" \
-  "$tmp/radix-live/examples" \
-  "$tmp/radix-live/core" \
-  "$tmp/radix-live/packages" \
-  "$tmp/root" \
-  "$tmp/radix/store"
-source_excludes="$tmp/source-excludes"
-cat > "$source_excludes" <<'EOF_EXCLUDES'
-./.git
-./build
-./dist
-./cache
-./.cache
-./coverage
-./htmlcov
-./reports
-./test-results
-./.coverage
-./.coverage.*
-./.hypothesis
-./.mypy_cache
-./.nox
-./.pytest_cache
-./.ruff_cache
-./.tox
-./.scratch
-./scratch
-./local-work
-./local-reports
-./test-work
-./test-output
-./tests/local
-./tests/generated
-./tests/scratch
-./tools/local
-*.local.test
-*.generated.test
-*.test-output
-./.idea
-./.vscode
-*/__pycache__
-*.pyc
-*.pyo
-*.pyd
-*.log
-*.tmp
-*.prof
-coverage*.xml
-junit*.xml
-*.iso
-*.img
-*.qcow2
-*.o
-*.a
-*.so
-*.luac
-.luacheckcache
-.DS_Store
-Thumbs.db
-*~
-*.swp
-EOF_EXCLUDES
-( cd "$here" && tar --exclude-from="$source_excludes" -cf - . ) | tar -xf - -C "$tmp/radix-live/core"
-( cd "$packages" && tar --exclude-from="$source_excludes" -cf - . ) | tar -xf - -C "$tmp/radix-live/packages"
+mkdir -p "$tmp/radix-live"/{sbin,bin,boot,examples,core,packages} "$tmp/root" "$tmp/radix/store"
+# Keep a complete snapshot of the distro installer source on the ISO. This is
+# also what gets copied to /var/lib/radix/distro on the installed machine.
+( cd "$here" && tar --exclude='./.git' --exclude='./build' --exclude='./dist' --exclude='./.cache' --exclude='*/__pycache__' -cf - . ) | tar -xf - -C "$tmp/radix-live/core"
+( cd "$packages" && tar --exclude='./.git' --exclude='./build' --exclude='./dist' --exclude='*/__pycache__' -cf - . ) | tar -xf - -C "$tmp/radix-live/packages"
 cp "$radix" "$tmp/radix-live/bin/radix"
 ln -s ../core/sbin/setup-radix "$tmp/radix-live/sbin/setup-radix"
 cp "$here/live/curl-compat" "$tmp/radix-live/bin/curl"; chmod 0755 "$tmp/radix-live/bin/curl"
@@ -162,9 +111,11 @@ RADIX_REPOSITORY=https://github.com/radix-gnu-linux/radix
 DEFAULT_DESKTOP=kde
 KDE_PLASMA=6.7.4
 KDE_FRAMEWORKS=6.28.0
+KDE_BOOTSTRAP_PREVIEW=$preview_kde
 EOF3
 cp "$tmp/radix-live/BUILD_INFO" "$build/BUILD_INFO"
 
+# Add every transitive store object needed by selectable installed profiles.
 cat "$roots_file" | while IFS= read -r root; do "$radix" store closure "$root"; done | sort -u | while IFS= read -r p; do
   case "$p" in /radix/store/*) [ -e "$tmp/radix/store/${p##*/}" ] || cp -a "$p" "$tmp/radix/store/${p##*/}";; esac
 done
@@ -180,7 +131,27 @@ export RADIX=/radix-live/bin/radix
 export RADIX_PACKAGES=/radix-live/packages
 export RADIX_LINUX_ROOT=/radix-live/core
 export PATH=/radix-live/sbin:/radix-live/bin:/run/current-system/bin:/run/current-system/sbin
+
+# Large desktop payloads live on the ISO filesystem rather than inside the
+# initramfs. Mount the ISO/USB image by volume label and expose the payload to
+# the installer. This keeps boot memory use reasonable even with KDE bundled.
+mkdir -p /run/radix-media
+if ! grep -q ' /run/radix-media ' /proc/mounts 2>/dev/null; then
+  media=$(blkid -L RADIX_LIVE 2>/dev/null || true)
+  [ -n "$media" ] || [ ! -b /dev/sr0 ] || media=/dev/sr0
+  if [ -n "$media" ]; then mount -o ro "$media" /run/radix-media 2>/dev/null || true; fi
+fi
+if [ -f /run/radix-media/radix/payload/kde-preview-rootfs.tar.gz ]; then
+  export RADIX_KDE_PREVIEW_ROOTFS=/run/radix-media/radix/payload/kde-preview-rootfs.tar.gz
+fi
+if [ -x /run/radix-media/radix/tools/bin/mkfs.ext4 ]; then
+  export PATH=/run/radix-media/radix/tools/bin:$PATH
+fi
+
 printf '\nRadix GNU/Linux live environment\n\n  setup-radix    Start the guided installer\n\n'
+if [ -n "${RADIX_KDE_PREVIEW_ROOTFS:-}" ]; then
+  echo '  KDE Plasma bootstrap preview payload: available'
+fi
 case " $(cat /proc/cmdline 2>/dev/null) " in
   *" radix.autoinstall=1 "*)
     echo 'Radix automated install: starting'

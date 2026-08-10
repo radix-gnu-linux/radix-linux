@@ -1,51 +1,63 @@
-name: build Radix GNU/Linux ISO
+name: build installable Radix GNU/Linux KDE ISO
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
   repository_dispatch:
     types: [packages-updated, radix-updated]
-  schedule:
-    - cron: '17 7 * * 0'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: radix-iso-${{ github.ref }}
+  group: radix-kde-test-iso-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   iso:
-    runs-on: ubuntu-latest
+    name: build, install and boot KDE image
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
+
     env:
-      RADIX_REQUIRE_KDE: '1'
-      RADIX_REPOSITORY_URL: https://github.com/radix-gnu-linux/radix.git
-      RADIX_PACKAGES_URL: https://github.com/radix-gnu-linux/radix-packages.git
-      RADIX_LINUX_URL: https://github.com/radix-gnu-linux/radix-linux.git
+      DEBIAN_FRONTEND: noninteractive
+      JANET_VERSION: 1.41.2
+      JANET_SHA256: 168e97e1b790f6e9d1e43685019efecc4ee473d6b9f8c421b49c195336c0b725
+      RADIX_REQUIRE_KDE: '0'
+      RADIX_KDE_PREVIEW: '1'
+
     steps:
+      - name: Check out distro
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: radix-linux
+          persist-credentials: false
+
       - name: Free runner disk space
+        shell: bash
         run: |
+          set -euo pipefail
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
           df -h
 
-      - name: Install build and VM tools
+      - name: Install build, desktop-image and VM tools
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential git curl wget xxd gprolog bubblewrap cpio xorriso \
-            grub-pc-bin grub-efi-amd64-bin mtools qemu-system-x86 ovmf \
-            musl-tools bc bison flex perl python3 python3-yaml openssl \
-            libssl-dev libelf-dev kmod xz-utils bzip2 file lua5.4 rsync
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git curl ca-certificates wget xxd \
+            gprolog bubblewrap cpio xorriso \
+            grub-pc-bin grub-efi-amd64-bin mtools \
+            qemu-system-x86 ovmf \
+            musl-tools bc bison flex perl python3 python3-yaml \
+            openssl libssl-dev libelf-dev kmod \
+            xz-utils bzip2 gzip file lua5.4 rsync \
+            debootstrap
 
       - name: Build and install Janet
         shell: bash
-        env:
-          JANET_VERSION: 1.41.2
-          JANET_SHA256: 168e97e1b790f6e9d1e43685019efecc4ee473d6b9f8c421b49c195336c0b725
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/janet-${JANET_VERSION}.tar.gz"
@@ -63,95 +75,145 @@ jobs:
           test -f "$source_dir/build/janet.h"
           test -f "$source_dir/build/libjanet.a"
           sudo install -d /usr/local/bin /usr/local/include/janet /usr/local/lib
-          sudo install -m 0755 "$source_dir/build/janet" /usr/local/bin/janet
-          sudo install -m 0644 "$source_dir/build/janet.h" /usr/local/include/janet/janet.h
+          sudo install -m0755 "$source_dir/build/janet" /usr/local/bin/janet
+          sudo install -m0644 "$source_dir/build/janet.h" /usr/local/include/janet/janet.h
           sudo ln -sfn janet/janet.h /usr/local/include/janet.h
-          sudo install -m 0644 "$source_dir/build/libjanet.a" /usr/local/lib/libjanet.a
+          sudo install -m0644 "$source_dir/build/libjanet.a" /usr/local/lib/libjanet.a
           hash -r
           janet -v
 
-      - name: Check out distro
-        uses: actions/checkout@v6
-        with:
-          path: radix-linux
-          persist-credentials: false
-
       - name: Check out Radix
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: radix-gnu-linux/radix
           path: radix
           persist-credentials: false
 
       - name: Check out package channel
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: radix-gnu-linux/radix-packages
           path: radix-packages
           persist-credentials: false
 
       - name: Check source trees
+        shell: bash
         run: |
+          set -euo pipefail
           ./radix-linux/tools/check-tree
           ./radix-packages/tools/check-tree
-          ./radix-linux/tools/check-package-contract ./radix-packages
+          RADIX_REQUIRE_KDE=0 ./radix-linux/tools/check-package-contract ./radix-packages
+
+      - name: Show native KDE promotion status
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo 'Native Radix KDE status (diagnostic only for the bootstrap preview):'
+          RADIX_REQUIRE_KDE=1 ./radix-linux/tools/check-package-contract ./radix-packages
 
       - name: Build Radix
         working-directory: radix
-        run: make -j"$(nproc)" build
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" build
+          test -x build/radix
+          ./build/radix --version
 
       - name: Radix release gate
         working-directory: radix
-        run: make release-gate
-
-      - name: Prepare canonical store
+        shell: bash
         run: |
+          set -euo pipefail
+          make release-gate
+
+      - name: Prepare canonical Radix store
+        shell: bash
+        run: |
+          set -euo pipefail
           sudo mkdir -p /radix
           sudo chown -R "$USER":"$(id -gn)" /radix
 
-      - name: Qualify and build KDE-first live ISO
+      - name: Build KDE bootstrap preview payload
         working-directory: radix-linux
+        shell: bash
         run: |
+          set -euo pipefail
+          make kde-preview
+          test -s build/kde-preview/kde-preview-rootfs.tar.gz
+          cat build/kde-preview/desktop-versions.txt
+          ls -lh build/kde-preview/kde-preview-rootfs.tar.gz
+
+      - name: Build installable KDE ISO
+        working-directory: radix-linux
+        shell: bash
+        run: |
+          set -euo pipefail
           set -o pipefail
-          make iso \
+          make iso-preview \
             RADIX=../radix/build/radix \
             PACKAGES=../radix-packages \
             2>&1 | tee build-iso.log
+          test -s dist/radix-live.iso
+          test -s dist/radix-live.iso.sha256
+          xorriso -indev dist/radix-live.iso \
+            -find /radix/payload/kde-preview-rootfs.tar.gz -type f -print \
+            2>/dev/null | grep -q kde-preview-rootfs.tar.gz
+          xorriso -indev dist/radix-live.iso \
+            -find /radix/payload/kde-preview-rootfs.tar.gz.sha256 -type f -print \
+            2>/dev/null | grep -q kde-preview-rootfs.tar.gz.sha256
+          xorriso -indev dist/radix-live.iso \
+            -find /radix/tools/bin/mkfs.ext4 -type f -print \
+            2>/dev/null | grep -q /radix/tools/bin/mkfs.ext4
+          ls -lh dist/radix-live.iso dist/radix-live.iso.sha256
 
-      - name: Boot live ISO
-        working-directory: radix-linux
-        run: DIST="$PWD/dist" ./scripts/qemu-smoke.sh
+      # Upload first. If QEMU discovers a boot bug, you still get the exact ISO
+      # for local testing/debugging instead of losing the artifact.
+      - name: Upload KDE test ISO
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: radix-gnu-linux-kde-test-${{ github.run_number }}
+          path: |
+            radix-linux/dist/radix-live.iso
+            radix-linux/dist/radix-live.iso.sha256
+            radix-linux/dist/build-info.json
+            radix-linux/build/kde-preview/manifest
+            radix-linux/build/kde-preview/desktop-versions.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: true
 
-      - name: Install and reboot disposable VM
+      - name: Boot live ISO in QEMU
         working-directory: radix-linux
-        run: BUILD="$PWD/build" ./scripts/qemu-install-smoke.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIST="$PWD/dist" ./scripts/qemu-smoke.sh
+
+      - name: Install KDE and reboot disposable VM
+        working-directory: radix-linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD="$PWD/build" DIST="$PWD/dist" RADIX_VM_MEMORY=6144M RADIX_VM_CPUS=4 \
+            ./scripts/qemu-install-smoke.sh
+
+      - name: Verify ISO checksum
+        working-directory: radix-linux/dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum -c radix-live.iso.sha256
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: radix-build-log-${{ github.run_number }}
-          path: radix-linux/build-iso.log
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload ISO artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: radix-gnu-linux-${{ github.run_number }}
+          name: radix-kde-build-log-${{ github.run_number }}
           path: |
-            radix-linux/dist/*.iso
-            radix-linux/dist/*.sha256
-            radix-linux/dist/*.json
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Publish tagged release assets
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
-            gh release create "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --title "Radix GNU/Linux ${GITHUB_REF_NAME}" --generate-notes
-          gh release upload "${GITHUB_REF_NAME}" radix-linux/dist/*.iso radix-linux/dist/*.sha256 radix-linux/dist/*.json \
-            --repo "$GITHUB_REPOSITORY" --clobber
+            radix-linux/build-iso.log
+            radix-linux/build/kde-preview/manifest
+            radix-linux/build/kde-preview/desktop-versions.txt
+          if-no-files-found: warn
+          retention-days: 14

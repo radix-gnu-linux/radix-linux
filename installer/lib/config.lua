@@ -23,23 +23,33 @@ end
 local function collect_desktop(a,opts)
   local repo=os.getenv('RADIX_PACKAGES') or '/radix-live/packages'
   local kde_missing=profile.kde_missing(repo)
-  local kde_available=#kde_missing==0
+  local kde_mode=profile.kde_mode(repo)
+  local kde_available=kde_mode~=nil
   local v=answer(a,'DESKTOP')
   if v then
     if v=='kde' and not kde_available then
-      ui.die('this image does not contain the complete KDE payload ('..#kde_missing..' recipe(s) missing)')
+      ui.die('this image does not contain an installable KDE payload ('..#kde_missing..' native recipe(s) are still missing and no bootstrap preview payload is present)')
     end
-    return v
+    return v,kde_mode
   end
-  if not interactive(opts) then return kde_available and defaults.desktop or 'console' end
+  if not interactive(opts) then
+    return kde_available and defaults.desktop or 'console',kde_mode
+  end
   if not kde_available then
-    ui.warn('KDE is not complete in this development image; console mode is the only installable profile.')
-    return 'console'
+    ui.warn('KDE is not available in this image. Only the console profile can be installed.')
+    return 'console',nil
   end
-  return ui.choice('Desktop environment',{
-    {label='KDE Plasma '..defaults.kde_plasma..' (recommended)',value='kde',description='Wayland desktop, SDDM, PipeWire and the standard Radix desktop profile.'},
-    {label='Console only',value='console',description='OpenRC base system without a graphical desktop.'}
+  local label='KDE Plasma '..defaults.kde_plasma..' (recommended)'
+  local description='Wayland desktop, SDDM, PipeWire and the Radix desktop profile.'
+  if kde_mode=='preview' then
+    label='KDE Plasma bootstrap preview (recommended for testing)'
+    description='Full KDE userspace bundled with this ISO while native Radix KDE recipes are still being completed.'
+  end
+  local value=ui.choice('Desktop environment',{
+    {label=label,value='kde',description=description},
+    {label='Console only',value='console',description='Radix/OpenRC base system without a graphical desktop.'}
   },1)
+  return value,kde_mode
 end
 
 function M.collect(a,opts)
@@ -65,7 +75,8 @@ function M.collect(a,opts)
     ui.screen('System','Choose what Radix should install')
   end
 
-  c.desktop=collect_desktop(a,opts)
+  c.desktop,c.kde_mode=collect_desktop(a,opts)
+  if c.desktop~='kde' then c.kde_mode=nil end
   if not one_of(c.desktop,{'kde','console'}) then ui.die('DESKTOP must be kde or console') end
 
   c.hostname=answer(a,'HOSTNAME') or (interactive(opts) and ui.prompt('Computer name',defaults.hostname) or defaults.hostname)
@@ -100,11 +111,32 @@ function M.collect(a,opts)
 
   c.gpu=probe.gpu()
   local requested=answer(a,'GPU_DRIVER') or 'auto'
-  if not one_of(requested,{'auto','mesa','nvidia','none'}) then ui.die('GPU_DRIVER must be auto, mesa, nvidia, or none') end
-  if c.desktop=='console' then c.gpu_driver='none'
-  elseif requested~='auto' then c.gpu_driver=requested
-  elseif c.gpu=='nvidia' then c.gpu_driver='nvidia'
-  else c.gpu_driver='mesa' end
+  if not one_of(requested,{'auto','mesa','nouveau','nvidia','none'}) then ui.die('GPU_DRIVER must be auto, mesa, nouveau, nvidia, or none') end
+  if c.desktop=='console' then
+    c.gpu_driver='none'
+  elseif c.kde_mode=='preview' then
+    -- The preview payload contains Mesa and the userspace needed by the kernel's
+    -- Intel/AMD/Nouveau drivers. A proprietary NVIDIA module must match the
+    -- exact Radix kernel, so do not pretend the generic preview can provide it.
+    if requested=='nvidia' then
+      ui.warn('proprietary NVIDIA is not bundled in the bootstrap preview; using Nouveau for this test install')
+      c.gpu_driver='nouveau'
+    elseif requested=='auto' and c.gpu=='nvidia' then
+      c.gpu_driver='nouveau'
+    elseif requested=='auto' then
+      c.gpu_driver='mesa'
+    elseif requested=='none' then
+      c.gpu_driver='none'
+    else
+      c.gpu_driver=requested
+    end
+  elseif requested~='auto' then
+    c.gpu_driver=requested
+  elseif c.gpu=='nvidia' then
+    c.gpu_driver='nvidia'
+  else
+    c.gpu_driver='mesa'
+  end
 
   c.fs=answer(a,'FILESYSTEM')
   if not c.fs then
@@ -217,7 +249,8 @@ end
 
 function M.summary(c)
   ui.screen('Review installation','Nothing has been written to disk yet')
-  ui.kv('Desktop',c.desktop=='kde' and ('KDE Plasma '..defaults.kde_plasma) or 'Console')
+  ui.kv('Desktop',c.desktop=='kde' and (c.kde_mode=='preview' and 'KDE Plasma bootstrap preview' or ('KDE Plasma '..defaults.kde_plasma)) or 'Console')
+  if c.desktop=='kde' then ui.kv('Desktop source',c.kde_mode=='preview' and 'ISO bootstrap payload' or 'native Radix packages') end
   ui.kv('Kernel',c.kernel=='lts' and 'Linux LTS' or 'Linux stable')
   ui.kv('C library',c.libc)
   ui.kv('Graphics',c.gpu..' / '..c.gpu_driver)

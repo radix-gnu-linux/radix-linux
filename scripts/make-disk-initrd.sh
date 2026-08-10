@@ -64,6 +64,16 @@ ln -s /radix/profiles/system /newroot/run/current-system
 mount --move /dev /newroot/dev 2>/dev/null || true
 mount --move /proc /newroot/proc 2>/dev/null || true
 mount --move /sys /newroot/sys 2>/dev/null || true
+if [ -e /newroot/etc/radix/kde-bootstrap-preview ]; then
+  for preview_init in /usr/sbin/openrc-init /sbin/openrc-init /sbin/init; do
+    if [ -x "/newroot$preview_init" ]; then
+      echo "Radix: switching to KDE bootstrap preview ($preview_init)"
+      exec switch_root /newroot "$preview_init"
+    fi
+  done
+  echo 'Radix: KDE bootstrap preview marker exists but no OpenRC init was found'
+  exec sh
+fi
 echo 'Radix: switching to installed system'
 exec switch_root /newroot /radix/profiles/system/init
 __INIT__

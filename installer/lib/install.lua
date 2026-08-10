@@ -16,7 +16,7 @@ end
 
 local function recipe_path(repo,id) return repo..'/pkgs/'..id..'.janet' end
 local function ensure_recipe_set(cfg,runtime)
-  if cfg.gpu_driver=='nvidia' and not u.exists(recipe_path(runtime.repo,'drivers/nvidia')) then
+  if cfg.kde_mode~='preview' and cfg.gpu_driver=='nvidia' and not u.exists(recipe_path(runtime.repo,'drivers/nvidia')) then
     ui.warn('the NVIDIA package is not present in this package-channel snapshot')
     ui.warn('falling back to the Mesa/Nouveau graphics path for this install')
     cfg.gpu_driver='mesa'; cfg.packages=profile.packages(cfg)
@@ -44,7 +44,7 @@ local function verify_profile_layout(cfg,profile_path)
     'bin/busybox','bin/bash','sbin/openrc-run','bin/dbus-daemon',
     'sbin/dhcpcd','bin/seatd'
   }
-  if cfg.desktop=='kde' then
+  if cfg.desktop=='kde' and cfg.kde_mode~='preview' then
     for _,rel in ipairs({'bin/sddm','bin/startplasma-wayland','bin/kwin_wayland','bin/pipewire','bin/wireplumber'}) do
       required[#required+1]=rel
     end
@@ -54,7 +54,7 @@ local function verify_profile_layout(cfg,profile_path)
   if cfg.libc=='glibc' and not first_existing(profile_path,{'lib64/ld-linux-x86-64.so.2','lib/ld-linux-x86-64.so.2'}) then
     missing[#missing+1]='glibc dynamic loader'
   end
-  if cfg.desktop=='kde' then
+  if cfg.desktop=='kde' and cfg.kde_mode~='preview' then
     if not first_existing(profile_path,{'lib/elogind/elogind','libexec/elogind','usr/lib/elogind/elogind','usr/libexec/elogind'}) then
       missing[#missing+1]='elogind daemon'
     end
@@ -92,6 +92,8 @@ local function package_preflight(cfg,runtime)
     u.run({'sh','-c',env..u.shell_quote(r)..' build '..u.shell_quote(id)..' --libc='..libc},{print=false})
   end
 
+  -- Building roots one-by-one is not enough: the installed profile must also
+  -- merge without collisions and expose the runtime paths the desktop needs.
   local manifest=runtime.root..'/preflight-system.janet'
   config.preflight_manifest(cfg,manifest)
   local output=u.capture({'sh','-c',env..u.shell_quote(r)..' system build '..u.shell_quote(manifest)},{stderr=false})
@@ -110,6 +112,65 @@ local function bind_canonical_store(cfg)
   u.mkdir(cfg.target..'/radix'); u.mkdir('/radix'); u.run({'mount','--bind',cfg.target..'/radix','/radix'},{print=false})
 end
 local function unbind_canonical_store() u.run({'umount','/radix'},{allow_fail=true,print=false}) end
+
+local function preview_archive()
+  local p=os.getenv('RADIX_KDE_PREVIEW_ROOTFS') or '/run/radix-media/radix/payload/kde-preview-rootfs.tar.gz'
+  return p
+end
+
+local function copy_if_dir(src,dst)
+  if not u.exists(src) then return end
+  u.mkdir(dst)
+  u.run({'cp','-a',src..'/.',dst..'/'},{print=false})
+end
+
+local function install_kde_preview(cfg)
+  local archive=preview_archive()
+  if not u.exists(archive) then ui.die('KDE bootstrap preview payload disappeared before installation: '..archive) end
+  local checksum=archive..'.sha256'
+  if not u.exists(checksum) then ui.die('KDE bootstrap preview checksum is missing: '..checksum) end
+  local dir=archive:match('^(.*)/[^/]+$') or '.'
+  ui.info('verifying KDE bootstrap preview payload')
+  u.run({'sh','-c','cd '..u.shell_quote(dir)..' && sha256sum -c kde-preview-rootfs.tar.gz.sha256'},{print=false})
+  ui.info('installing KDE bootstrap preview userspace from the ISO')
+  u.run({'tar','-xzf',archive,'-C',cfg.target,'--numeric-owner'},{print=false})
+
+  -- The preview userspace boots the exact Radix kernel selected above. Make its
+  -- matching modules and Radix firmware visible at conventional runtime paths.
+  local system=cfg.target..'/radix/profiles/system'
+  u.run({'rm','-rf',cfg.target..'/lib/modules'},{allow_fail=true,print=false})
+  copy_if_dir(system..'/lib/modules',cfg.target..'/lib/modules')
+  copy_if_dir(system..'/lib/firmware',cfg.target..'/lib/firmware')
+
+  local rootdev=cfg.root_partuuid and ('PARTUUID='..cfg.root_partuuid) or cfg.root
+  local espdev=cfg.esp_partuuid and ('PARTUUID='..cfg.esp_partuuid) or cfg.esp
+  local fstab=rootdev..' / '..cfg.fs..' defaults 0 1\n'..
+    espdev..' /boot/efi vfat umask=0077 0 2\n'
+  if cfg.swap then
+    local swapdev=cfg.swap_partuuid and ('PARTUUID='..cfg.swap_partuuid) or cfg.swap
+    fstab=fstab..swapdev..' none swap sw 0 0\n'
+  end
+  u.write(cfg.target..'/etc/fstab',fstab,'0644')
+  u.write(cfg.target..'/etc/hostname',cfg.hostname..'\n','0644')
+  u.write(cfg.target..'/etc/hosts','127.0.0.1 localhost\n127.0.1.1 '..cfg.hostname..'\n::1 localhost ip6-localhost ip6-loopback\n','0644')
+  u.write(cfg.target..'/etc/timezone',cfg.timezone..'\n','0644')
+  if u.exists(cfg.target..'/usr/share/zoneinfo/'..cfg.timezone) then
+    u.run({'ln','-sfn','/usr/share/zoneinfo/'..cfg.timezone,cfg.target..'/etc/localtime'},{print=false})
+  end
+  u.write(cfg.target..'/etc/default/locale','LANG='..cfg.locale..'\n','0644')
+
+  u.mkdir(cfg.target..'/etc/radix')
+  u.write(cfg.target..'/etc/radix/kde-bootstrap-preview',
+    'This system uses the temporary KDE bootstrap preview userspace.\n'..
+    'Radix still owns the kernel, boot artifacts, package store, channels and installer state.\n',
+    '0644')
+  u.mkdir(cfg.target..'/etc/profile.d')
+  u.write(cfg.target..'/etc/profile.d/radix.sh',
+    'export RADIX_ROOT=/radix\n'..
+    'export RADIX_REPOSITORY=/var/lib/radix/repository\n'..
+    'export RADIX_SANDBOX=strict\n'..
+    'export PATH=/radix/bin:$PATH\n', '0644')
+end
 
 local function root_layout(cfg)
   for _,d in ipairs({'var','home','root','tmp','run','boot','etc','dev','proc','sys','var/log','var/lib','var/cache'}) do u.mkdir(cfg.target..'/'..d) end
@@ -160,7 +221,8 @@ end
 
 function M.go(cfg,opts)
   opts=opts or {}
-  local required={'mount','umount','mkfs.vfat','mkswap','cpio','blockdev','mdev'}
+  local required={'mount','umount','mkfs.vfat','mkswap','cpio','blockdev','mdev','tar'}
+  if cfg.desktop=='kde' and cfg.kde_mode=='preview' then required[#required+1]='sha256sum' end
   if cfg.fs=='ext4' then required[#required+1]='mkfs.ext4'
   elseif cfg.fs=='btrfs' then required[#required+1]='mkfs.btrfs'
   else required[#required+1]='mkfs.ext2' end
@@ -194,28 +256,39 @@ function M.go(cfg,opts)
     seed_store(cfg); bind_canonical_store(cfg); bound=true
     local manifest=runtime.root..'/system.janet'; config.system_manifest(cfg,manifest)
     run_radix(cfg,runtime,manifest)
-    root_layout(cfg); install_bootstrap_tools(cfg,runtime)
-    ui.note('immutable system generation installed')
+    if cfg.desktop=='kde' and cfg.kde_mode=='preview' then
+      install_kde_preview(cfg)
+    else
+      root_layout(cfg)
+    end
+    install_bootstrap_tools(cfg,runtime)
+    ui.note('immutable Radix system generation installed')
 
     ui.step(5,7,'Create users and machine configuration')
-    cfg.noninteractive=opts.noninteractive; accounts.write(cfg)
-    u.run({opts.repo_root..'/scripts/sync-etc.sh',cfg.target},{print=false})
-    if cfg.admin and cfg.username~='' then
-      u.mkdir(cfg.target..'/etc/sudoers.d')
-      u.write(cfg.target..'/etc/sudoers.d/10-wheel','%wheel ALL=(ALL:ALL) ALL\n','0440')
+    cfg.noninteractive=opts.noninteractive
+    if cfg.desktop=='kde' and cfg.kde_mode=='preview' then
+      accounts.write_preview(cfg)
+      u.run({opts.repo_root..'/scripts/configure-kde-preview.sh',cfg.target,cfg.gpu_driver,cfg.username,cfg.keymap},{print=false})
+    else
+      accounts.write(cfg)
+      u.run({opts.repo_root..'/scripts/sync-etc.sh',cfg.target},{print=false})
+      if cfg.admin and cfg.username~='' then
+        u.mkdir(cfg.target..'/etc/sudoers.d')
+        u.write(cfg.target..'/etc/sudoers.d/10-wheel','%wheel ALL=(ALL:ALL) ALL\n','0440')
+      end
+      if cfg.libc~='musl' then
+        configure_desktop(cfg,opts.repo_root)
+      else
+        u.mkdir(cfg.target..'/etc/radix')
+        u.write(cfg.target..'/etc/radix/desktop.conf','desktop=console\ngpu_driver=none\n','0644')
+      end
     end
     machine_identity(cfg)
     repositories.write_installed_metadata(cfg,cfg.target)
-    if cfg.libc~='musl' then
-      configure_desktop(cfg,opts.repo_root)
-    else
-      u.mkdir(cfg.target..'/etc/radix')
-      u.write(cfg.target..'/etc/radix/desktop.conf','desktop=console\ngpu_driver=none\n','0644')
-    end
     u.mkdir(cfg.target..'/etc/radix')
     u.run({'cp',manifest,cfg.target..'/etc/radix/system.janet'},{print=false})
-    u.write(cfg.target..'/etc/radix/installed','Radix GNU/Linux\n','0644')
-    ui.note(cfg.desktop=='kde' and 'KDE Plasma session configured as the default desktop' or 'console system configured')
+    u.write(cfg.target..'/etc/radix/installed','Radix GNU/Linux\n'..(cfg.kde_mode=='preview' and 'desktop-bootstrap=debian-sid-kde\n' or ''),'0644')
+    ui.note(cfg.desktop=='kde' and (cfg.kde_mode=='preview' and 'KDE Plasma bootstrap preview configured as the default desktop' or 'KDE Plasma session configured as the default desktop') or 'console system configured')
 
     ui.step(6,7,'Install bootloader')
     u.run({opts.repo_root..'/scripts/install-bootloader.sh',cfg.target,cfg.disk,cfg.root,cfg.firmware,cfg.kernel,cfg.root_partuuid or '',cfg.serial_console and '1' or '0'},{print=false})

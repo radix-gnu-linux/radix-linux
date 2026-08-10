@@ -30,7 +30,7 @@ for p in Path('installer').rglob('*.lua'):
 for p in Path('.').rglob('*'):
     if p.is_file() and any(x in p.parts for x in ('build','dist','__pycache__')): continue
     if p.name.endswith(('.pyc','.pyo','.o','.a','.so')): bad.append(f'binary/cache artifact: {p}')
-for required in ('README.md','VERSION','installer/setup-radix.lua','scripts/build-live.sh','scripts/qemu-install-smoke.sh'):
+for required in ('README.md','VERSION','installer/setup-radix.lua','scripts/build-live.sh','scripts/build-kde-preview-rootfs.sh','scripts/configure-kde-preview.sh','scripts/qemu-install-smoke.sh'):
     if not Path(required).exists(): bad.append(f'missing required file: {required}')
 
 # Release defaults are part of the distro contract. Keep these assertions
@@ -46,28 +46,30 @@ for needle in (
     if needle not in defaults: bad.append('release default missing: '+needle)
 workflow=Path('.github/workflows/build-iso.yml').read_text()
 
-# Check the release workflow semantically rather than depending on one exact
-# YAML/shell formatting style. A perfectly valid multiline shell command such
-# as `make iso \\n#   RADIX=... \\n#   PACKAGES=...` must satisfy the same contract as a one-line command.
+# Check that CI still invokes the Radix ISO builder with the official sibling
+# checkout paths. Developer/test workflows may intentionally use iso-console
+# while the KDE package closure is still being promoted.
 import re
 
-if not re.search(r"(?m)^\s*RADIX_REQUIRE_KDE:\s*['\"]?1['\"]?\s*$", workflow):
-    bad.append("release workflow contract missing: RADIX_REQUIRE_KDE=1")
-
-# Remove shell line continuations and collapse whitespace before checking the
-# ISO command. Limit the match to a small command-sized window so unrelated
-# RADIX/PACKAGES strings elsewhere in the workflow cannot satisfy it.
 workflow_shell = re.sub(r"\\\s*\n\s*", " ", workflow)
 workflow_shell = re.sub(r"[ \t]+", " ", workflow_shell)
 iso_contract = re.compile(
-    r"make\s+iso\b(?=[^\n]{0,300}\bRADIX=\.\./radix/build/radix\b)"
+    r"make\s+(?:iso|iso-console|iso-preview)\b(?=[^\n]{0,300}\bRADIX=\.\./radix/build/radix\b)"
     r"(?=[^\n]{0,300}\bPACKAGES=\.\./radix-packages\b)[^\n]{0,300}"
 )
 if not iso_contract.search(workflow_shell):
     bad.append(
-        "release workflow contract missing: make iso with "
+        "workflow contract missing: make iso/iso-console/iso-preview with "
         "RADIX=../radix/build/radix and PACKAGES=../radix-packages"
     )
+
+
+makefile=Path('Makefile').read_text()
+for needle in ('iso-preview:', 'kde-preview:', 'qemu-install: iso-preview'):
+    if needle not in makefile: bad.append('KDE preview build contract missing: '+needle)
+for needle in ('debootstrap', 'make iso-preview', 'RADIX_KDE_PREVIEW'):
+    if needle not in workflow: bad.append('KDE preview workflow contract missing: '+needle)
+
 if bad: raise SystemExit('\n'.join(bad))
 print('radix-linux source shape: OK')
 __CHECK__
