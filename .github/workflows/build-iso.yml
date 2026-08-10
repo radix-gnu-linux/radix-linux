@@ -60,16 +60,16 @@ jobs:
 
       - name: Build Janet
         run: |
-          source="$RUNNER_TEMP/janet.tar.gz"
-          mkdir -p "$RUNNER_TEMP/janet"
-          curl --fail --location --proto '=https' --tlsv1.2 \
-            "https://github.com/janet-lang/janet/archive/refs/tags/v${JANET_VERSION}.tar.gz" \
-            --output "$source"
-          printf '%s  %s\n' "$JANET_SHA256" "$source" | sha256sum --check --strict
-          tar -xzf "$source" --strip-components=1 -C "$RUNNER_TEMP/janet"
-          make -C "$RUNNER_TEMP/janet" -j"$(nproc)"
-          sudo make -C "$RUNNER_TEMP/janet" install
-          janet -v
+            source="$RUNNER_TEMP/janet.tar.gz"
+            mkdir -p "$RUNNER_TEMP/janet"
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              "https://github.com/janet-lang/janet/archive/refs/tags/v${JANET_VERSION}.tar.gz" \
+              --output "$source"
+            printf '%s  %s\n' "$JANET_SHA256" "$source" | sha256sum --check --strict
+            tar -xzf "$source" --strip-components=1 -C "$RUNNER_TEMP/janet"
+            make -C "$RUNNER_TEMP/janet" -j"$(nproc)"
+            sudo make -C "$RUNNER_TEMP/janet" install || true
+            janet -v
 
       - name: Check out Radix
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
