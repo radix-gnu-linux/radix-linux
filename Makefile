@@ -1,13 +1,14 @@
 SHELL := /bin/sh
 
-# Keep source locations canonical. Radix intentionally rejects lexical ".."
-# components in repository paths, so callers should never hand them through.
+# Canonicalize sibling checkout locations before handing them to Radix.
+# Radix deliberately rejects paths containing lexical ".." components.
 RADIX ?= $(abspath $(CURDIR)/../radix/build/radix)
 PACKAGES ?= $(abspath $(CURDIR)/../radix-packages)
 BUILD ?= $(abspath $(CURDIR)/build)
 DIST ?= $(abspath $(CURDIR)/dist)
 
 .PHONY: check check-channel qualify-desktop bootstrap kde-preview live iso iso-native iso-console iso-preview qemu qemu-install clean
+
 check:
 	./tools/check-tree
 
