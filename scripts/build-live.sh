@@ -15,6 +15,7 @@ if [ ! -x "$radix" ] || [ ! -d "$packages/pkgs" ]; then
     echo 'git is required to bootstrap missing Radix sources' >&2
     exit 1
   }
+
   eval "$("$here/scripts/bootstrap-sources.sh")"
   radix=$RADIX
   packages=$PACKAGES
@@ -24,14 +25,12 @@ fi
   echo "radix executable not found: $radix" >&2
   exit 1
 }
+
 [ -d "$packages/pkgs" ] || {
   echo "radix-packages checkout not found: $packages" >&2
   exit 1
 }
 
-# Canonicalize every host-side path before it reaches Radix. Radix deliberately
-# rejects lexical parent components ("..") in repository paths. Keep that
-# validation intact and normalize the caller's paths here instead.
 canonical_dir()
 {
   path=$1
@@ -52,6 +51,7 @@ canonical_file()
 }
 
 mkdir -p "$build"
+
 radix=$(canonical_file "$radix")
 packages=$(canonical_dir "$packages")
 build=$(canonical_dir "$build")
@@ -60,7 +60,8 @@ echo "[live] Radix binary:    $radix"
 echo "[live] package channel: $packages"
 echo "[live] build directory: $build"
 
-if command -v readelf >/dev/null 2>&1 && readelf -W -l "$radix" 2>/dev/null | grep -q INTERP; then
+if command -v readelf >/dev/null 2>&1 &&
+   readelf -W -l "$radix" 2>/dev/null | grep -q INTERP; then
   echo 'refusing to embed a dynamically linked Radix binary in the live/install environment' >&2
   exit 1
 fi
@@ -70,12 +71,14 @@ command -v grub-mkstandalone >/dev/null 2>&1 || {
   exit 1
 }
 
-check_recipe_file() {
+check_recipe_file()
+{
   id=$1
   [ -f "$packages/pkgs/$id.janet" ] || return 1
 }
 
-check_profile() {
+check_profile()
+{
   file=$1
   label=$2
   missing=
@@ -114,20 +117,20 @@ export RADIX_SANDBOX=strict
 
 "$radix" system validate "$here/live/system.janet"
 
-# Build the packages the live installer needs in its PATH through the live
-# system itself. KDE/base target packages are realized separately and copied as
-# immutable store closures, so installer preflight never compiles after boot.
 rm -rf "$build/core-boot"
 "$radix" system image "$here/live/system.janet" "$build/core-boot"
+
 cp "$build/core-boot/initrd" "$build/live-initrd"
 cp "$build/core-boot/vmlinuz" "$build/vmlinuz"
 
 roots_file="$build/installer-roots"
 : > "$roots_file"
 
-build_root() {
+build_root()
+{
   id=$1
   libc=${2:-glibc}
+
   echo "[payload] $id"
   path=$("$radix" build "$id" --libc="$libc" | tail -n 1)
 
@@ -142,10 +145,8 @@ build_root() {
   esac
 }
 
-# Kernel alternatives offered by setup-radix.
 build_root base/linux-stable glibc
 
-# Full installed base profile.
 while IFS= read -r id; do
   case "$id" in
     ''|'#'*) continue ;;
@@ -153,8 +154,6 @@ while IFS= read -r id; do
   build_root "$id" glibc
 done < "$here/profiles/base.packages"
 
-# KDE is the default install profile and therefore a hard payload contract for
-# normal release ISOs.
 if [ "$require_kde" = 1 ]; then
   while IFS= read -r id; do
     case "$id" in
@@ -164,13 +163,10 @@ if [ "$require_kde" = 1 ]; then
   done < "$here/profiles/kde.packages"
 fi
 
-# Musl console path remains available as an explicit experimental option.
 if [ -f "$packages/pkgs/base/busybox-musl.janet" ]; then
   build_root base/busybox-musl musl
 fi
 
-# Proprietary NVIDIA is optional at image-build time. The installer falls back
-# to Mesa when this recipe has not been promoted yet.
 if [ -f "$packages/pkgs/drivers/nvidia.janet" ]; then
   build_root drivers/nvidia glibc
 fi
@@ -180,7 +176,7 @@ sort -u "$roots_file" -o "$roots_file"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-# This script is /bin/sh, so avoid Bash-only brace expansion here.
+# POSIX sh: do not use Bash-only brace expansion here.
 mkdir -p \
   "$tmp/radix-live/sbin" \
   "$tmp/radix-live/bin" \
@@ -191,8 +187,6 @@ mkdir -p \
   "$tmp/root" \
   "$tmp/radix/store"
 
-# Keep a complete snapshot of the distro installer source on the ISO. This is
-# also what gets copied to /var/lib/radix/distro on the installed machine.
 (
   cd "$here"
   tar \
@@ -216,11 +210,14 @@ mkdir -p \
 
 cp "$radix" "$tmp/radix-live/bin/radix"
 ln -s ../core/sbin/setup-radix "$tmp/radix-live/sbin/setup-radix"
+
 cp "$here/live/curl-compat" "$tmp/radix-live/bin/curl"
 chmod 0755 "$tmp/radix-live/bin/curl"
+
 cp -a "$here/examples/." "$tmp/radix-live/examples/"
 
-git_rev() {
+git_rev()
+{
   git -C "$1" rev-parse HEAD 2>/dev/null || printf '%s\n' archive
 }
 
@@ -244,7 +241,6 @@ EOF3
 
 cp "$tmp/radix-live/BUILD_INFO" "$build/BUILD_INFO"
 
-# Add every transitive store object needed by selectable installed profiles.
 while IFS= read -r root; do
   "$radix" store closure "$root"
 done < "$roots_file" |
@@ -275,14 +271,12 @@ export RADIX_PACKAGES=/radix-live/packages
 export RADIX_LINUX_ROOT=/radix-live/core
 export PATH=/radix-live/sbin:/radix-live/bin:/run/current-system/bin:/run/current-system/sbin
 
-# Large desktop payloads live on the ISO filesystem rather than inside the
-# initramfs. Mount the ISO/USB image by volume label and expose the payload to
-# the installer. This keeps boot memory use reasonable even with KDE bundled.
 mkdir -p /run/radix-media
 
 if ! grep -q ' /run/radix-media ' /proc/mounts 2>/dev/null; then
   media=$(blkid -L RADIX_LIVE 2>/dev/null || true)
   [ -n "$media" ] || [ ! -b /dev/sr0 ] || media=/dev/sr0
+
   if [ -n "$media" ]; then
     mount -o ro "$media" /run/radix-media 2>/dev/null || true
   fi
