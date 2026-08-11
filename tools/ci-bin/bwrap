@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+real_bwrap="${RADIX_REAL_BWRAP:-/usr/bin/bwrap}"
+mode="${RADIX_SANDBOX_NETWORK:-isolated}"
+
+if [[ ! -x "$real_bwrap" ]]; then
+  echo "radix CI bwrap shim: real bubblewrap not executable: $real_bwrap" >&2
+  exit 127
+fi
+
+case "$mode" in
+  isolated)
+    exec "$real_bwrap" "$@"
+    ;;
+  host)
+    filtered=()
+    removed=0
+
+    for arg in "$@"; do
+      if [[ "$arg" == "--unshare-net" ]]; then
+        removed=1
+        continue
+      fi
+      filtered+=("$arg")
+    done
+
+    if (( removed == 0 )); then
+      echo "radix CI bwrap shim: warning: --unshare-net was not present" >&2
+    fi
+
+    exec "$real_bwrap" "${filtered[@]}"
+    ;;
+  *)
+    echo "radix CI bwrap shim: invalid RADIX_SANDBOX_NETWORK=$mode" >&2
+    exit 64
+    ;;
+esac
