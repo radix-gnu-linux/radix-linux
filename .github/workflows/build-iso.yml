@@ -139,8 +139,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make kde-preview
+          mkdir -p build
+
+          set +e
+          make kde-preview 2>&1 | tee build/kde-preview-ci.log
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            echo
+            echo '=== KDE preview build failed ==='
+            echo 'Last 200 lines of the build log:'
+            tail -n 200 build/kde-preview-ci.log || true
+
+            if [ -f build/kde-preview/rootfs/var/log/apt/term.log ]; then
+              echo
+              echo '=== apt terminal log (last 300 lines) ==='
+              sudo tail -n 300 build/kde-preview/rootfs/var/log/apt/term.log || true
+            fi
+
+            if [ -f build/kde-preview/rootfs/var/log/dpkg.log ]; then
+              echo
+              echo '=== dpkg log (last 300 lines) ==='
+              sudo tail -n 300 build/kde-preview/rootfs/var/log/dpkg.log || true
+            fi
+
+            exit "$status"
+          fi
+
           test -s build/kde-preview/kde-preview-rootfs.tar.gz
+          test -s build/kde-preview/manifest
+          test -s build/kde-preview/packages.tsv
           cat build/kde-preview/desktop-versions.txt
           ls -lh build/kde-preview/kde-preview-rootfs.tar.gz
 
@@ -213,7 +242,13 @@ jobs:
           name: radix-kde-build-log-${{ github.run_number }}
           path: |
             radix-linux/build-iso.log
+            radix-linux/build/kde-preview-ci.log
             radix-linux/build/kde-preview/manifest
             radix-linux/build/kde-preview/desktop-versions.txt
+            radix-linux/build/kde-preview/packages.tsv
+            radix-linux/build/kde-preview/logs/apt-term.log
+            radix-linux/build/kde-preview/logs/dpkg.log
+            radix-linux/build/kde-preview/rootfs/var/log/apt/term.log
+            radix-linux/build/kde-preview/rootfs/var/log/dpkg.log
           if-no-files-found: warn
           retention-days: 14
