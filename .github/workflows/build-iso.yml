@@ -19,7 +19,6 @@ jobs:
     name: build, install and boot KDE image
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-
     env:
       DEBIAN_FRONTEND: noninteractive
       JANET_VERSION: 1.41.2
@@ -179,21 +178,50 @@ jobs:
         run: |
           set -euo pipefail
           set -o pipefail
+
+          RADIX_PATH="${GITHUB_WORKSPACE}/radix/build/radix"
+          PACKAGES_PATH="${GITHUB_WORKSPACE}/radix-packages"
+          BUILD_PATH="${GITHUB_WORKSPACE}/radix-linux/build"
+          DIST_PATH="${GITHUB_WORKSPACE}/radix-linux/dist"
+
+          test -x "$RADIX_PATH"
+          test -d "$PACKAGES_PATH/pkgs"
+          mkdir -p "$BUILD_PATH" "$DIST_PATH"
+
+          echo "Radix binary:    $RADIX_PATH"
+          echo "Package channel: $PACKAGES_PATH"
+          echo "Build directory: $BUILD_PATH"
+          echo "ISO directory:   $DIST_PATH"
+
+          case "$RADIX_PATH:$PACKAGES_PATH:$BUILD_PATH:$DIST_PATH" in
+            *"/../"*|*"/.." )
+              echo 'Refusing non-canonical workspace path containing ..' >&2
+              exit 1
+              ;;
+          esac
+
           make iso-preview \
-            RADIX=../radix/build/radix \
-            PACKAGES=../radix-packages \
+            RADIX="$RADIX_PATH" \
+            PACKAGES="$PACKAGES_PATH" \
+            BUILD="$BUILD_PATH" \
+            DIST="$DIST_PATH" \
             2>&1 | tee build-iso.log
+
           test -s dist/radix-live.iso
           test -s dist/radix-live.iso.sha256
+
           xorriso -indev dist/radix-live.iso \
             -find /radix/payload/kde-preview-rootfs.tar.gz -type f -print \
             2>/dev/null | grep -q kde-preview-rootfs.tar.gz
+
           xorriso -indev dist/radix-live.iso \
             -find /radix/payload/kde-preview-rootfs.tar.gz.sha256 -type f -print \
             2>/dev/null | grep -q kde-preview-rootfs.tar.gz.sha256
+
           xorriso -indev dist/radix-live.iso \
             -find /radix/tools/bin/mkfs.ext4 -type f -print \
             2>/dev/null | grep -q /radix/tools/bin/mkfs.ext4
+
           ls -lh dist/radix-live.iso dist/radix-live.iso.sha256
 
       # Upload first. If QEMU discovers a boot bug, you still get the exact ISO
