@@ -1,15 +1,24 @@
 #!/bin/sh
 set -eu
+
 cd "$(dirname "$0")/.."
-for f in scripts/*.sh sbin/* tools/lua-run; do sh -n "$f"; done
+
+for f in scripts/*.sh sbin/* tools/lua-run; do
+  sh -n "$f"
+done
+
 python3 - <<'__PYCHECK__'
 from pathlib import Path
+
 for p in Path('tools').glob('*.py'):
-    compile(p.read_text(),str(p),'exec')
+    compile(p.read_text(), str(p), 'exec')
+
 print('python syntax: OK')
 __PYCHECK__
+
 python3 - <<'__YAMLCHECK__'
 from pathlib import Path
+
 try:
     import yaml
 except ImportError:
@@ -20,72 +29,118 @@ else:
             yaml.safe_load(f)
     print('workflow yaml: OK')
 __YAMLCHECK__
+
 python3 - <<'__CHECK__'
 from pathlib import Path
-bad=[]
-for p in Path('installer').rglob('*.lua'):
-    s=p.read_text()
-    if '\t' in s: bad.append(f'{p}: tab character')
-    if '\x00' in s: bad.append(f'{p}: NUL')
-for p in Path('.').rglob('*'):
-    if p.is_file() and any(x in p.parts for x in ('build','dist','__pycache__')): continue
-    if p.name.endswith(('.pyc','.pyo','.o','.a','.so')): bad.append(f'binary/cache artifact: {p}')
-for required in ('README.md','VERSION','installer/setup-radix.lua','scripts/build-live.sh','scripts/build-kde-preview-rootfs.sh','scripts/configure-kde-preview.sh','scripts/qemu-install-smoke.sh'):
-    if not Path(required).exists(): bad.append(f'missing required file: {required}')
 
-# Release defaults are part of the distro contract. Keep these assertions
-# here so a harmless-looking refactor cannot silently point the installer at
-# somebody else's channel or turn the release image back into console-only.
-defaults=Path('installer/lib/defaults.lua').read_text()
+bad = []
+
+for p in Path('installer').rglob('*.lua'):
+    s = p.read_text()
+    if '\t' in s:
+        bad.append(f'{p}: tab character')
+    if '\x00' in s:
+        bad.append(f'{p}: NUL')
+
+for p in Path('.').rglob('*'):
+    if p.is_file() and any(x in p.parts for x in ('build', 'dist', '__pycache__')):
+        continue
+    if p.name.endswith(('.pyc', '.pyo', '.o', '.a', '.so')):
+        bad.append(f'binary/cache artifact: {p}')
+
+for required in (
+    'README.md',
+    'VERSION',
+    'installer/setup-radix.lua',
+    'scripts/build-live.sh',
+    'scripts/build-kde-preview-rootfs.sh',
+    'scripts/configure-kde-preview.sh',
+    'scripts/qemu-install-smoke.sh',
+):
+    if not Path(required).exists():
+        bad.append(f'missing required file: {required}')
+
+# Release defaults are part of the distro contract.
+defaults = Path('installer/lib/defaults.lua').read_text()
 for needle in (
     "M.core_repository='https://github.com/radix-gnu-linux/radix-linux'",
     "M.packages_repository='https://github.com/radix-gnu-linux/radix-packages.git'",
     "M.radix_repository='https://github.com/radix-gnu-linux/radix.git'",
     "M.desktop='kde'",
 ):
-    if needle not in defaults: bad.append('release default missing: '+needle)
-workflow=Path('.github/workflows/build-iso.yml').read_text()
+    if needle not in defaults:
+        bad.append('release default missing: ' + needle)
 
-# Check that CI still invokes the Radix ISO builder with the official sibling
-# checkout paths. Developer/test workflows may intentionally use iso-console
-# while the KDE package closure is still being promoted.
-import re
+workflow = Path('.github/workflows/build-iso.yml').read_text()
 
-workflow_shell = re.sub(r"\\\s*\n\s*", " ", workflow)
-workflow_shell = re.sub(r"[ \t]+", " ", workflow_shell)
-iso_contract = re.compile(
-    r"make\s+(?:iso|iso-console|iso-preview)\b(?=[^\n]{0,300}\bRADIX=\.\./radix/build/radix\b)"
-    r"(?=[^\n]{0,300}\bPACKAGES=\.\./radix-packages\b)[^\n]{0,300}"
-)
-if not iso_contract.search(workflow_shell):
-    bad.append(
-        "workflow contract missing: make iso/iso-console/iso-preview with "
-        "RADIX=../radix/build/radix and PACKAGES=../radix-packages"
-    )
+# CI must use canonical workspace paths. Radix intentionally rejects lexical
+# parent components ("..") in repository paths, so the old sibling-relative
+# contract is no longer valid.
+for forbidden in (
+    'RADIX=../radix/build/radix',
+    'PACKAGES=../radix-packages',
+):
+    if forbidden in workflow:
+        bad.append(
+            'obsolete workflow path contract present: '
+            + forbidden
+            + ' (use canonical GITHUB_WORKSPACE paths)'
+        )
 
+for needle in (
+    'RADIX_PATH="${GITHUB_WORKSPACE}/radix/build/radix"',
+    'PACKAGES_PATH="${GITHUB_WORKSPACE}/radix-packages"',
+    'make iso-preview',
+    'RADIX="$RADIX_PATH"',
+    'PACKAGES="$PACKAGES_PATH"',
+):
+    if needle not in workflow:
+        bad.append('canonical ISO workflow contract missing: ' + needle)
 
-makefile=Path('Makefile').read_text()
-for needle in ('iso-preview:', 'kde-preview:', 'qemu-install: iso-preview'):
-    if needle not in makefile: bad.append('KDE preview build contract missing: '+needle)
+makefile = Path('Makefile').read_text()
+
+# Make defaults may refer to sibling checkouts internally, but abspath must
+# normalize them before they are passed to Radix/build-live.sh.
+for needle in (
+    'RADIX ?= $(abspath $(CURDIR)/../radix/build/radix)',
+    'PACKAGES ?= $(abspath $(CURDIR)/../radix-packages)',
+    'iso-preview:',
+    'kde-preview:',
+    'qemu-install: iso-preview',
+):
+    if needle not in makefile:
+        bad.append('Makefile contract missing: ' + needle)
+
 for needle in ('debootstrap', 'make iso-preview', 'RADIX_KDE_PREVIEW'):
-    if needle not in workflow: bad.append('KDE preview workflow contract missing: '+needle)
+    if needle not in workflow:
+        bad.append('KDE preview workflow contract missing: ' + needle)
 
-if bad: raise SystemExit('\n'.join(bad))
+if bad:
+    raise SystemExit('\n'.join(bad))
+
 print('radix-linux source shape: OK')
 __CHECK__
+
 ./tools/test-activation.sh >/dev/null
+
 if ./tools/lua-run -e 'assert(_VERSION >= "Lua 5.3")' >/dev/null 2>&1; then
   for f in installer/*.lua installer/lib/*.lua tools/*.lua; do
     ./tools/lua-run -e "assert(loadfile([[$f]]))"
   done
+
   ./tools/lua-run tools/test-installer.lua "$(pwd)" >/dev/null
+
   acct=$(mktemp -d)
   ./tools/lua-run tools/test-accounts.lua "$(pwd)" "$acct" >/dev/null
   rm -rf "$acct"
-  img=$(mktemp); rm -f "$img"
+
+  img=$(mktemp)
+  rm -f "$img"
   trap 'rm -f "$img"' EXIT HUP INT TERM
+
   ./tools/lua-run tools/test-gpt.lua "$(pwd)" "$img" >/dev/null
   python3 tools/check-gpt.py --swap=0 "$img" >/dev/null
+
   echo 'lua + GPT checks: OK'
 else
   echo 'lua check: SKIP (install Lua 5.3+ for the full source gate)'
