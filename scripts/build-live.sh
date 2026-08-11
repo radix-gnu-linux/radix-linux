@@ -7,6 +7,7 @@ radix=${RADIX:-$here/../radix/build/radix}
 packages=${PACKAGES:-$here/../radix-packages}
 require_kde=${RADIX_REQUIRE_KDE:-1}
 preview_kde=${RADIX_KDE_PREVIEW:-0}
+sandbox_network=${RADIX_SANDBOX_NETWORK:-isolated}
 
 "$here/scripts/check-host.sh" build
 
@@ -59,6 +60,34 @@ build=$(canonical_dir "$build")
 echo "[live] Radix binary:    $radix"
 echo "[live] package channel: $packages"
 echo "[live] build directory: $build"
+
+# Radix normally isolates package builds in a private network namespace.
+# Some hosted CI environments permit user namespaces but deny the RTM_NEWADDR
+# operation bubblewrap uses to configure loopback inside CLONE_NEWNET.
+#
+# Keep the complete strict sandbox and disable only network namespace
+# isolation when RADIX_SANDBOX_NETWORK=host is explicitly requested.
+case "$sandbox_network" in
+  isolated)
+    echo "[live] sandbox network: isolated"
+    ;;
+  host)
+    ci_bwrap_dir="$here/tools/ci-bin"
+    [ -x "$ci_bwrap_dir/bwrap" ] || {
+      echo "CI bubblewrap compatibility shim not found: $ci_bwrap_dir/bwrap" >&2
+      exit 1
+    }
+    PATH="$ci_bwrap_dir:$PATH"
+    export PATH
+    echo "[live] sandbox network: host (CI compatibility mode)"
+    ;;
+  *)
+    echo "invalid RADIX_SANDBOX_NETWORK=$sandbox_network (expected isolated or host)" >&2
+    exit 1
+    ;;
+esac
+
+export RADIX_SANDBOX_NETWORK="$sandbox_network"
 
 if command -v readelf >/dev/null 2>&1 &&
    readelf -W -l "$radix" 2>/dev/null | grep -q INTERP; then
