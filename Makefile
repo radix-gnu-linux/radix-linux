@@ -1,8 +1,11 @@
 SHELL := /bin/sh
-RADIX ?= ../radix/build/radix
-PACKAGES ?= ../radix-packages
-BUILD ?= $(CURDIR)/build
-DIST ?= $(CURDIR)/dist
+
+# Keep source locations canonical. Radix intentionally rejects lexical ".."
+# components in repository paths, so callers should never hand them through.
+RADIX ?= $(abspath $(CURDIR)/../radix/build/radix)
+PACKAGES ?= $(abspath $(CURDIR)/../radix-packages)
+BUILD ?= $(abspath $(CURDIR)/build)
+DIST ?= $(abspath $(CURDIR)/dist)
 
 .PHONY: check check-channel qualify-desktop bootstrap kde-preview live iso iso-native iso-console iso-preview qemu qemu-install clean
 check:
