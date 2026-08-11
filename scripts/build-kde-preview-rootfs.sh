@@ -43,21 +43,21 @@ $sudo_cmd chmod 0755 "$root/usr/sbin/policy-rc.d"
 # Keep package selection explicit. This payload is a temporary stage-0 bridge
 # so people can install and test Radix with a real Plasma desktop while the
 # native Radix Qt/KDE recipes are still being qualified.
-packages='\
-openrc elogind libpam-elogind dbus polkitd udev seatd \
-network-manager wpasupplicant iw wireless-regdb \
-pipewire pipewire-pulse pipewire-alsa wireplumber libspa-0.2-bluetooth alsa-utils rtkit \
-upower udisks2 bluez \
-mesa-vulkan-drivers libgl1-mesa-dri libegl-mesa0 libgbm1 libdrm2 libinput10 xwayland mesa-utils vulkan-tools \
-kde-plasma-desktop plasma-workspace kwin-wayland plasma-nm plasma-pa \
-powerdevil bluedevil kscreen sddm sddm-theme-breeze kde-config-sddm \
-konsole dolphin kio-extras ark kate \
-xdg-desktop-portal xdg-desktop-portal-kde xdg-user-dirs xdg-utils shared-mime-info \
-fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fontconfig \
-firmware-linux firmware-amd-graphics firmware-iwlwifi firmware-misc-nonfree firmware-nvidia-graphics \
-firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek firmware-sof-signed \
-sudo passwd login bash bash-completion coreutils util-linux procps psmisc kmod dbus-x11 \
-iproute2 iputils-ping curl wget openssh-client rsync less nano \
+packages='
+openrc elogind libpam-elogind dbus polkitd udev seatd 
+network-manager wpasupplicant iw wireless-regdb 
+pipewire pipewire-pulse pipewire-alsa wireplumber libspa-0.2-bluetooth alsa-utils rtkit 
+upower udisks2 bluez 
+mesa-vulkan-drivers libgl1-mesa-dri libegl-mesa0 libgbm1 libdrm2 libinput10 xwayland mesa-utils vulkan-tools
+kde-plasma-desktop plasma-workspace kwin-wayland plasma-nm plasma-pa 
+powerdevil bluedevil kscreen sddm sddm-theme-breeze kde-config-sddm 
+konsole dolphin kio-extras ark kate 
+xdg-desktop-portal xdg-desktop-portal-kde xdg-user-dirs xdg-utils shared-mime-info 
+fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fontconfig 
+firmware-linux firmware-amd-graphics firmware-iwlwifi firmware-misc-nonfree firmware-nvidia-graphics 
+firmware-realtek firmware-atheros firmware-brcm80211 firmware-mediatek firmware-sof-signed 
+sudo passwd login bash bash-completion coreutils util-linux procps psmisc kmod dbus-x11 
+iproute2 iputils-ping curl wget openssh-client rsync less nano 
 e2fsprogs dosfstools btrfs-progs pciutils usbutils hwdata locales'
 
 echo '[preview] installing KDE, OpenRC and hardware userspace'
