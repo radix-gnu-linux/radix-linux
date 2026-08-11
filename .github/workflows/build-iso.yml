@@ -71,6 +71,50 @@ jobs:
             xz-utils bzip2 gzip file lua5.4 rsync \
             debootstrap
 
+      - name: Enable Bubblewrap user namespaces for Radix CI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo '=== Bubblewrap / user namespace preflight ==='
+          bwrap --version
+          uname -a
+
+          # Ubuntu 24.04 enables an AppArmor restriction on unprivileged user
+          # namespaces. Bubblewrap relies on a user namespace when invoked by
+          # the normal GitHub Actions user, and otherwise dies while writing
+          # uid_map/gid_map.
+          if sysctl -a 2>/dev/null | grep -q '^kernel\.apparmor_restrict_unprivileged_userns ='; then
+            original="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)"
+            printf '%s\n' "$original" > "$RUNNER_TEMP/radix-apparmor-userns-original"
+
+            echo "kernel.apparmor_restrict_unprivileged_userns: $original -> 0"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo 'AppArmor user-namespace restriction sysctl is not present on this runner.'
+            : > "$RUNNER_TEMP/radix-apparmor-userns-original"
+          fi
+
+          echo "user.max_user_namespaces=$(sysctl -n user.max_user_namespaces 2>/dev/null || echo unknown)"
+
+          # Test the same namespace classes Radix asks Bubblewrap to create,
+          # except networking: RADIX_SANDBOX_NETWORK=host intentionally strips
+          # --unshare-net on GitHub-hosted runners.
+          /usr/bin/bwrap \
+            --die-with-parent \
+            --new-session \
+            --unshare-pid \
+            --unshare-ipc \
+            --unshare-uts \
+            --unshare-cgroup-try \
+            --ro-bind / / \
+            --proc /proc \
+            --dev /dev \
+            -- \
+            /bin/true
+
+          echo 'Bubblewrap namespace preflight: PASS'
+
       - name: Build and install Janet
         shell: bash
         run: |
@@ -298,3 +342,20 @@ jobs:
             radix-linux/build/kde-preview/rootfs/var/log/dpkg.log
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Restore runner user namespace restriction
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          state_file="$RUNNER_TEMP/radix-apparmor-userns-original"
+          if [ -s "$state_file" ]; then
+            original="$(cat "$state_file")"
+            case "$original" in
+              0|1)
+                echo "Restoring kernel.apparmor_restrict_unprivileged_userns=$original"
+                sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns="$original" || true
+                ;;
+            esac
+          fi
