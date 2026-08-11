@@ -38,6 +38,17 @@ jobs:
           path: radix-linux
           persist-credentials: false
 
+      - name: Prepare CI helper scripts
+        working-directory: radix-linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f tools/ci-bin/bwrap
+          chmod +x tools/ci-bin/bwrap
+          test -x tools/ci-bin/bwrap
+          echo "CI bubblewrap shim:"
+          ls -l tools/ci-bin/bwrap
+
       - name: Free runner disk space
         shell: bash
         run: |
