@@ -7,6 +7,7 @@ out=$build/kde-preview
 root=$out/rootfs
 archive=$out/kde-preview-rootfs.tar.gz
 mirror=${RADIX_PREVIEW_DEBIAN_MIRROR:-https://deb.debian.org/debian}
+
 # The bootstrap payload should be stable enough for CI. Native Radix packages
 # remain the long-term source of truth; this Debian root is only a stage-0 bridge.
 suite=${RADIX_PREVIEW_DEBIAN_SUITE:-trixie}
@@ -32,10 +33,12 @@ if [ -d "$root" ]; then
   $sudo_cmd umount -R "$root/dev" 2>/dev/null || true
   $sudo_cmd umount "$root/proc" 2>/dev/null || true
 fi
+
 $sudo_cmd rm -rf "$out"
 mkdir -p "$out"
 
 mounted=0
+
 cleanup_mounts() {
   [ "$mounted" -eq 1 ] || return 0
 
@@ -95,6 +98,7 @@ dump_package_failure() {
 
 configure_pending() {
   echo '[preview] configuring pending packages'
+
   if ! chroot_env dpkg --configure -a; then
     dump_package_failure
     return 1
@@ -111,6 +115,7 @@ apt_install_group() {
   shift
 
   echo "[preview] installing $label"
+
   if chroot_env apt-get install \
       -y \
       --no-install-recommends \
@@ -129,6 +134,7 @@ apt_install_group() {
 
   echo "[preview] attempting one controlled dpkg/apt repair for $label" >&2
   chroot_env dpkg --configure -a || true
+
   if ! chroot_env apt-get \
       -y \
       -f install \
@@ -144,6 +150,7 @@ apt_install_group() {
   fi
 
   echo "[preview] verifying requested $label packages after repair"
+
   if ! chroot_env apt-get install \
       -y \
       --no-install-recommends \
@@ -158,6 +165,7 @@ apt_install_group() {
 }
 
 echo "[preview] creating Debian $suite stage-0 root"
+
 $sudo_cmd debootstrap \
   --arch=amd64 \
   --variant=minbase \
@@ -172,35 +180,64 @@ EOF2
 # chroot. The installed Radix target receives its real OpenRC activation graph
 # from setup-radix.
 $sudo_cmd install -d "$root/usr/sbin"
+
 cat <<'EOF2' | $sudo_cmd tee "$root/usr/sbin/policy-rc.d" >/dev/null
 #!/bin/sh
 exit 101
 EOF2
+
 $sudo_cmd chmod 0755 "$root/usr/sbin/policy-rc.d"
 
 # Give maintainer scripts the normal kernel pseudo-filesystems they expect.
 # Services are still prevented from starting by policy-rc.d.
 echo '[preview] mounting chroot runtime filesystems'
+
 $sudo_cmd mkdir -p "$root/proc" "$root/sys" "$root/dev" "$root/run"
+
 # Mark cleanup active before the first mount so a failure halfway through the
 # sequence cannot leak an earlier mount into the runner.
 mounted=1
+
 $sudo_cmd mount -t proc proc "$root/proc"
 $sudo_cmd mount --rbind /dev "$root/dev"
 $sudo_cmd mount --make-rslave "$root/dev"
 $sudo_cmd mount --rbind /sys "$root/sys"
 $sudo_cmd mount --make-rslave "$root/sys"
 $sudo_cmd mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$root/run"
+
 $sudo_cmd mkdir -p "$root/run/lock" "$root/run/udev" "$root/run/dbus"
 
 echo '[preview] refreshing Debian package metadata'
 chroot_env apt-get update
 
-# Keep the bootstrap packages in smaller transactions. This prevents a single
-# low-level maintainer-script failure from turning into an unreadable desktop-
+# Install the OpenRC/SysV compatibility infrastructure first. Debian's procps
+# init script depends on mountkernfs, which is supplied by the initscripts
+# package. Keeping this in a separate transaction guarantees that the boot
+# scripts and insserv dependency graph exist before procps/udev are configured.
+apt_install_group 'OpenRC boot infrastructure' \
+  openrc \
+  initscripts \
+  sysvinit-utils
+
+# Fail early with a useful error if Debian ever changes this contract.
+[ -x "$root/etc/init.d/mountkernfs.sh" ] || {
+  echo 'OpenRC bootstrap is missing /etc/init.d/mountkernfs.sh after installing initscripts' >&2
+  exit 1
+}
+
+# Ensure insserv considers mountkernfs enabled before procps and udev register
+# their own SysV/OpenRC dependencies. This only creates init dependency links;
+# policy-rc.d still prevents services from starting in the chroot.
+echo '[preview] registering mountkernfs boot dependency'
+if ! chroot_env insserv mountkernfs.sh; then
+  dump_package_failure
+  exit 1
+fi
+
+# Keep the remaining bootstrap packages in smaller transactions. This prevents
+# a low-level maintainer-script failure from turning into an unreadable desktop-
 # wide dependency cascade and makes the first broken layer obvious in CI.
 apt_install_group 'base init and session services' \
-  openrc \
   elogind \
   libpam-elogind \
   dbus \
@@ -327,31 +364,40 @@ for rel in \
   }
 done
 
-find "$root/usr/lib" -path '*/security/pam_elogind.so' -type f -print -quit | grep -q . || {
-  echo 'KDE preview payload is missing pam_elogind.so' >&2
-  exit 1
-}
+find "$root/usr/lib" -path '*/security/pam_elogind.so' -type f -print -quit |
+  grep -q . || {
+    echo 'KDE preview payload is missing pam_elogind.so' >&2
+    exit 1
+  }
 
 # Export the ext4 formatter and its exact Debian runtime dependencies as a tiny
 # live-installer tool root. The live rescue image stays static/BusyBox, while
 # mkfs.ext4 can run directly from the mounted ISO before the target root exists.
 tools=$out/live-tools
 tools_root=$tools/root
+
 $sudo_cmd mkdir -p "$tools_root/usr/sbin" "$tools_root/etc"
 
 copy_tool_path() {
   rel=$1
   src=$root$rel
+
   [ -e "$src" ] || {
     echo "preview live tool dependency missing: $rel" >&2
     exit 1
   }
+
   $sudo_cmd mkdir -p "$tools_root$(dirname "$rel")"
   $sudo_cmd cp -L "$src" "$tools_root$rel"
 }
 
 copy_tool_path /usr/sbin/mke2fs
-for dep in $($sudo_cmd chroot "$root" /usr/bin/ldd /usr/sbin/mke2fs | awk '{for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i}' | sort -u); do
+
+for dep in $(
+  $sudo_cmd chroot "$root" /usr/bin/ldd /usr/sbin/mke2fs |
+    awk '{for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i}' |
+    sort -u
+); do
   copy_tool_path "$dep"
 done
 
@@ -360,32 +406,44 @@ if [ -f "$root/etc/mke2fs.conf" ]; then
 fi
 
 $sudo_cmd chown -R "$(id -u):$(id -g)" "$tools"
+
 mkdir -p "$tools/bin"
+
 cat > "$tools/bin/mkfs.ext4" <<'LIVE_TOOL'
 #!/bin/sh
 set -eu
+
 root=/run/radix-media/radix/tools/root
 loader=
+
 for p in \
   "$root"/lib64/ld-linux-x86-64.so.2 \
   "$root"/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 \
   "$root"/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
-  [ -x "$p" ] && { loader=$p; break; }
+  [ -x "$p" ] && {
+    loader=$p
+    break
+  }
 done
+
 [ -n "$loader" ] || {
   echo 'Radix live ext4 tool: dynamic loader missing' >&2
   exit 1
 }
+
 export MKE2FS_CONFIG="$root/etc/mke2fs.conf"
+
 exec "$loader" \
   --library-path "$root/lib/x86_64-linux-gnu:$root/usr/lib/x86_64-linux-gnu:$root/lib64" \
   "$root/usr/sbin/mke2fs" -t ext4 "$@"
 LIVE_TOOL
+
 chmod 0755 "$tools/bin/mkfs.ext4"
 
 # openrc-init is PID 1 for this preview. systemd libraries and udev may still be
 # present as runtime dependencies, but systemd is not selected as the init.
 $sudo_cmd ln -sfn /usr/sbin/openrc-init "$root/sbin/init"
+
 $sudo_cmd mkdir -p \
   "$root/etc/runlevels/sysinit" \
   "$root/etc/runlevels/boot" \
@@ -394,6 +452,7 @@ $sudo_cmd mkdir -p \
 # SDDM should prefer Plasma Wayland. setup-radix adds the actual OpenRC service
 # activation on the installed target.
 $sudo_cmd mkdir -p "$root/etc/sddm.conf.d"
+
 cat <<'EOF2' | $sudo_cmd tee "$root/etc/sddm.conf.d/00-radix-preview.conf" >/dev/null
 [General]
 DisplayServer=wayland
@@ -412,10 +471,20 @@ $sudo_cmd rm -f "$root/etc/machine-id"
 $sudo_cmd truncate -s 0 "$root/etc/machine-id"
 
 # Record exactly what the bootstrap contains before removing package logs/caches.
-$sudo_cmd chroot "$root" dpkg-query -W -f='${Package}\t${Version}\n' \
-  | LC_ALL=C sort > "$out/packages.tsv"
+$sudo_cmd chroot "$root" dpkg-query -W -f='${Package}\t${Version}\n' |
+  LC_ALL=C sort > "$out/packages.tsv"
 
-for pkg in plasma-desktop plasma-workspace kwin-wayland sddm openrc elogind network-manager pipewire wireplumber; do
+for pkg in \
+  plasma-desktop \
+  plasma-workspace \
+  kwin-wayland \
+  sddm \
+  openrc \
+  initscripts \
+  elogind \
+  network-manager \
+  pipewire \
+  wireplumber; do
   grep -E "^${pkg}[[:space:]]" "$out/packages.tsv" || true
 done > "$out/desktop-versions.txt"
 
@@ -425,17 +494,21 @@ printf '%s\n' \
   "mirror=$mirror" \
   "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   > "$out/manifest"
+
 cat "$out/desktop-versions.txt" >> "$out/manifest"
 
 # Keep copies of package-manager logs outside the root so CI can upload them
 # even after the rootfs itself is trimmed.
 mkdir -p "$out/logs"
+
 if [ -f "$root/var/log/apt/term.log" ]; then
   $sudo_cmd cp "$root/var/log/apt/term.log" "$out/logs/apt-term.log"
 fi
+
 if [ -f "$root/var/log/dpkg.log" ]; then
   $sudo_cmd cp "$root/var/log/dpkg.log" "$out/logs/dpkg.log"
 fi
+
 $sudo_cmd chown -R "$(id -u):$(id -g)" "$out/logs"
 
 # Trim caches and mutable machine state. This is a bootstrap payload, not a
@@ -446,6 +519,7 @@ $sudo_cmd rm -rf \
   "$root/var/log"/* \
   "$root/tmp"/* \
   "$root/var/tmp"/*
+
 $sudo_cmd mkdir -p \
   "$root/var/lib/apt/lists/partial" \
   "$root/var/cache/apt/archives/partial" \
@@ -454,6 +528,7 @@ $sudo_cmd mkdir -p \
 # /dev, /proc, /sys and /run are runtime mounts and are empty here after the
 # cleanup above. Exclusions are retained as a safety belt.
 echo '[preview] packing KDE userspace'
+
 $sudo_cmd tar \
   --numeric-owner \
   --one-file-system \
@@ -464,7 +539,12 @@ $sudo_cmd tar \
   -C "$root" -czf "$archive" .
 
 $sudo_cmd chown "$(id -u):$(id -g)" "$archive"
-( cd "$out" && sha256sum kde-preview-rootfs.tar.gz ) > "$archive.sha256"
+
+(
+  cd "$out"
+  sha256sum kde-preview-rootfs.tar.gz
+) > "$archive.sha256"
+
 chmod 0644 \
   "$archive" \
   "$archive.sha256" \
